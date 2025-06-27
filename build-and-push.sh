@@ -5,13 +5,22 @@
 
 set -e  # Exit on any error
 
-echo "🔵 INFO: Starting OpenTelemetry Collector build and push process..."
+# Check if port argument is provided
+if [ $# -eq 0 ]; then
+    echo "❌ ERROR: Port number is required"
+    echo "Usage: $0 <port_number>"
+    echo "Example: $0 5000"
+    exit 1
+fi
 
 # Configuration
-REGISTRY="localhost:42069"
+REGISTRY_PORT="$1"
+REGISTRY="localhost:${REGISTRY_PORT}"
 IMAGE_NAME="otelcontribcol"
 TAG="latest"
 FULL_IMAGE_NAME="${REGISTRY}/${IMAGE_NAME}:${TAG}"
+
+echo "🔵 INFO: Starting OpenTelemetry Collector build and push process..."
 
 echo "🔵 INFO: Building Docker image..."
 make docker-otelcontribcol
