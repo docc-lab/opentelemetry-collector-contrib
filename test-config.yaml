@@ -1,0 +1,27 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  spanreconstruction:
+    max_active_spans: 1000
+    span_ttl: 1h
+    enable_metrics: false
+
+exporters:
+  debug:
+    verbosity: detailed
+
+service:
+  telemetry:
+    logs:
+      level: DEBUG
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [spanreconstruction]
+      exporters: [debug] 

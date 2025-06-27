@@ -1,0 +1,13 @@
+type: spanreconstruction
+
+status:
+  class: processor
+  stability:
+    development: [traces]
+  distributions: [contrib]
+  codeowners:
+    active: [tomislavzm]
+tests:
+  config:
+    max_active_spans: 1000
+    span_ttl: "1h" 

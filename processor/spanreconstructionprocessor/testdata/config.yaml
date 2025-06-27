@@ -1,0 +1,10 @@
+processors:
+  spanreconstruction:
+    max_active_spans: 1000
+    span_ttl: 1h
+    enable_metrics: false
+
+service:
+  pipelines:
+    traces:
+      processors: [spanreconstruction] 
