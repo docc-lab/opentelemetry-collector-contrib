@@ -47,3 +47,4 @@ go.work*
 
 # AI files
 *AI*.md
+*.convo

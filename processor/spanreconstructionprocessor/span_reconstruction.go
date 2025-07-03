@@ -122,6 +122,7 @@ func (p *spanReconstructionProcessor) processSpan(span ptrace.Span, outputScope 
 		zap.String("trace_id", span.TraceID().String()),
 		zap.String("span_id", span.SpanID().String()),
 		zap.String("span_name", span.Name()),
+		zap.String("span_kind", span.Kind().String()),
 		zap.Bool("has_start_time", span.StartTimestamp() != 0),
 		zap.Bool("has_end_time", span.EndTimestamp() != 0),
 		zap.Int("events_count", span.Events().Len()),
@@ -191,6 +192,7 @@ func (p *spanReconstructionProcessor) handleSpanStart(span ptrace.Span, spanKey 
 		zap.String("trace_id", span.TraceID().String()),
 		zap.String("span_id", span.SpanID().String()),
 		zap.String("span_name", span.Name()),
+		zap.String("span_kind", span.Kind().String()),
 		zap.Int("current_active_spans", len(p.activeSpans)),
 		zap.Int("max_active_spans", p.config.MaxActiveSpans))
 
@@ -235,7 +237,8 @@ func (p *spanReconstructionProcessor) handleSpanEnd(span ptrace.Span, spanKey st
 	p.logger.Info("🟢 INFO: Handling span END event",
 		zap.String("trace_id", span.TraceID().String()),
 		zap.String("span_id", span.SpanID().String()),
-		zap.String("span_name", span.Name()))
+		zap.String("span_name", span.Name()),
+		zap.String("span_kind", span.Kind().String()))
 
 	activeSpan, exists := p.activeSpans[spanKey]
 	if !exists {
