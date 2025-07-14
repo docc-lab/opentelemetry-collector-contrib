@@ -21,6 +21,17 @@ type Config struct {
 
 	// EnableMetrics enables internal metrics about processor operation.
 	EnableMetrics bool `mapstructure:"enable_metrics"`
+
+	// Node-and-Edge Configuration
+	// EnableNodeAndEdge enables the node-and-edge deconstruction functionality.
+	EnableNodeAndEdge bool `mapstructure:"enable_node_and_edge"`
+
+	// StrictParentChildValidation enables strict validation of parent-child relationships.
+	StrictParentChildValidation bool `mapstructure:"strict_parent_child_validation"`
+
+	// EmitImmediately controls whether completed spans are emitted immediately
+	// when they finish or held for later processing.
+	EmitImmediately bool `mapstructure:"emit_immediately"`
 }
 
 var _ component.Config = (*Config)(nil)
@@ -33,6 +44,7 @@ func (cfg *Config) Validate() error {
 	if cfg.SpanTTL <= 0 {
 		cfg.SpanTTL = time.Hour // default value
 	}
+
 	return nil
 }
 
