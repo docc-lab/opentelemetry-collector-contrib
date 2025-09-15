@@ -39,6 +39,7 @@ type perfTestDataProvider struct {
 	options            LoadOptions
 	traceIDSequence    atomic.Uint64
 	dataItemsGenerated *atomic.Uint64
+	generateFragmented bool // New field to control fragmented span generation
 }
 
 // NewPerfTestDataProvider creates an instance of perfTestDataProvider which generates test data based on the sizes
@@ -46,6 +47,14 @@ type perfTestDataProvider struct {
 func NewPerfTestDataProvider(options LoadOptions) DataProvider {
 	return &perfTestDataProvider{
 		options: options,
+	}
+}
+
+// NewFragmentedPerfTestDataProvider creates an instance of perfTestDataProvider that generates fragmented spans
+func NewFragmentedPerfTestDataProvider(options LoadOptions) DataProvider {
+	return &perfTestDataProvider{
+		options:            options,
+		generateFragmented: true,
 	}
 }
 
@@ -65,22 +74,57 @@ func (dp *perfTestDataProvider) GenerateTraces() (ptrace.Traces, bool) {
 
 		spanID := dp.dataItemsGenerated.Add(1)
 
-		span := spans.AppendEmpty()
+		if dp.generateFragmented {
+			// Generate fragmented spans (START and END events separately)
+			log.Printf("🟢 DEBUG: Generating fragmented span pair %d", spanID)
 
-		// Create a span.
-		span.SetTraceID(idutils.UInt64ToTraceID(0, traceID))
-		span.SetSpanID(idutils.UInt64ToSpanID(spanID))
-		span.SetName("load-generator-span" + strconv.FormatUint(spanID+traceID*1000, 10))
-		span.SetKind(ptrace.SpanKindClient)
-		attrs := span.Attributes()
-		attrs.PutInt("load_generator.span_seq_num", int64(spanID))
-		attrs.PutInt("load_generator.trace_seq_num", int64(traceID))
-		// Additional attributes.
-		for k, v := range dp.options.Attributes {
-			attrs.PutStr(k, v)
+			// Create START event (span begins) - has start timestamp but NO end timestamp
+			startSpan := spans.AppendEmpty()
+			startSpan.SetTraceID(idutils.UInt64ToTraceID(0, traceID))
+			startSpan.SetSpanID(idutils.UInt64ToSpanID(spanID))
+			startSpan.SetName("fragmented-span-start")
+			startSpan.SetKind(ptrace.SpanKindServer)
+			startSpan.SetStartTimestamp(pcommon.NewTimestampFromTime(startTime))
+			// Note: NO end timestamp - this is a START event
+			attrs := startSpan.Attributes()
+			attrs.PutStr("event.type", "START")
+			attrs.PutInt("load_generator.span_seq_num", int64(spanID))
+			attrs.PutInt("load_generator.trace_seq_num", int64(traceID))
+
+			// Create END event (span completes) - has end timestamp but NO start timestamp
+			endSpan := spans.AppendEmpty()
+			endSpan.SetTraceID(idutils.UInt64ToTraceID(0, traceID))
+			endSpan.SetSpanID(idutils.UInt64ToSpanID(spanID))
+			endSpan.SetName("fragmented-span-end")
+			endSpan.SetKind(ptrace.SpanKindServer)
+			endSpan.SetEndTimestamp(pcommon.NewTimestampFromTime(endTime))
+			// Note: NO start timestamp - this is an END event
+			attrs = endSpan.Attributes()
+			attrs.PutStr("event.type", "END")
+			attrs.PutInt("load_generator.span_seq_num", int64(spanID))
+			attrs.PutInt("load_generator.trace_seq_num", int64(traceID))
+
+			// Increment counter for both spans
+			dp.dataItemsGenerated.Add(1) // Add one more since we created 2 spans
+		} else {
+			// Generate complete spans (original behavior)
+			span := spans.AppendEmpty()
+
+			// Create a span.
+			span.SetTraceID(idutils.UInt64ToTraceID(0, traceID))
+			span.SetSpanID(idutils.UInt64ToSpanID(spanID))
+			span.SetName("load-generator-span" + strconv.FormatUint(spanID+traceID*1000, 10))
+			span.SetKind(ptrace.SpanKindClient)
+			attrs := span.Attributes()
+			attrs.PutInt("load_generator.span_seq_num", int64(spanID))
+			attrs.PutInt("load_generator.trace_seq_num", int64(traceID))
+			// Additional attributes.
+			for k, v := range dp.options.Attributes {
+				attrs.PutStr(k, v)
+			}
+			span.SetStartTimestamp(pcommon.NewTimestampFromTime(startTime))
+			span.SetEndTimestamp(pcommon.NewTimestampFromTime(endTime))
 		}
-		span.SetStartTimestamp(pcommon.NewTimestampFromTime(startTime))
-		span.SetEndTimestamp(pcommon.NewTimestampFromTime(endTime))
 	}
 	return traceData, false
 }
@@ -284,4 +328,82 @@ func (dp *FileDataProvider) GenerateMetrics() (pmetric.Metrics, bool) {
 func (dp *FileDataProvider) GenerateLogs() (plog.Logs, bool) {
 	dp.dataItemsGenerated.Add(uint64(dp.ItemsPerBatch))
 	return dp.logs, false
+}
+
+// fragmentedSpanDataProvider is an implementation of the DataProvider for testing span reconstruction.
+// It generates fragmented spans (START/END events) that need to be reconstructed by span reconstruction processors.
+type fragmentedSpanDataProvider struct {
+	options            LoadOptions
+	spanCounter        atomic.Uint64
+	dataItemsGenerated *atomic.Uint64
+}
+
+// NewFragmentedSpanDataProvider creates an instance of fragmentedSpanDataProvider which generates
+// fragmented span events (START/END) to test span reconstruction processors.
+func NewFragmentedSpanDataProvider(options LoadOptions) DataProvider {
+	return &fragmentedSpanDataProvider{
+		options: options,
+	}
+}
+
+func (dp *fragmentedSpanDataProvider) SetLoadGeneratorCounters(dataItemsGenerated *atomic.Uint64) {
+	dp.dataItemsGenerated = dataItemsGenerated
+}
+
+func (dp *fragmentedSpanDataProvider) GenerateTraces() (ptrace.Traces, bool) {
+	log.Printf("🟢 DEBUG: fragmentedSpanDataProvider.GenerateTraces() called")
+
+	traceData := ptrace.NewTraces()
+	spans := traceData.ResourceSpans().AppendEmpty().ScopeSpans().AppendEmpty().Spans()
+	spans.EnsureCapacity(dp.options.ItemsPerBatch * 2) // 2 spans per item (START + END)
+
+	log.Printf("🟢 DEBUG: Generating %d fragmented span pairs", dp.options.ItemsPerBatch)
+
+	for i := 0; i < dp.options.ItemsPerBatch; i++ {
+		spanCounter := dp.spanCounter.Add(1)
+		startTime := time.Now().Add(time.Duration(i) * time.Millisecond)
+		endTime := startTime.Add(time.Millisecond)
+
+		// Create START event (span begins) - has start timestamp but NO end timestamp
+		startSpan := spans.AppendEmpty()
+		startSpan.SetTraceID(idutils.UInt64ToTraceID(0, spanCounter))
+		startSpan.SetSpanID(idutils.UInt64ToSpanID(spanCounter))
+		startSpan.SetName("fragmented-span-start")
+		startSpan.SetKind(ptrace.SpanKindServer)
+		startSpan.SetStartTimestamp(pcommon.NewTimestampFromTime(startTime))
+		// Note: NO end timestamp - this is a START event
+		attrs := startSpan.Attributes()
+		attrs.PutStr("event.type", "START")
+		attrs.PutInt("span.counter", int64(spanCounter))
+
+		// Create END event (span completes) - has end timestamp but NO start timestamp
+		endSpan := spans.AppendEmpty()
+		endSpan.SetTraceID(idutils.UInt64ToTraceID(0, spanCounter))
+		endSpan.SetSpanID(idutils.UInt64ToSpanID(spanCounter))
+		endSpan.SetName("fragmented-span-end")
+		endSpan.SetKind(ptrace.SpanKindServer)
+		endSpan.SetEndTimestamp(pcommon.NewTimestampFromTime(endTime))
+		// Note: NO start timestamp - this is an END event
+		attrs = endSpan.Attributes()
+		attrs.PutStr("event.type", "END")
+		attrs.PutInt("span.counter", int64(spanCounter))
+
+		// Increment the counter for both spans
+		dp.dataItemsGenerated.Add(2)
+
+		log.Printf("🟢 DEBUG: Generated fragmented span pair %d (START + END)", spanCounter)
+	}
+
+	log.Printf("🟢 DEBUG: Returning %d spans total", spans.Len())
+	return traceData, false
+}
+
+func (dp *fragmentedSpanDataProvider) GenerateMetrics() (pmetric.Metrics, bool) {
+	// Not used for fragmented span testing
+	return pmetric.NewMetrics(), false
+}
+
+func (dp *fragmentedSpanDataProvider) GenerateLogs() (plog.Logs, bool) {
+	// Not used for fragmented span testing
+	return plog.NewLogs(), false
 }

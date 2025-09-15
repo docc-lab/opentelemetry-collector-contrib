@@ -1,0 +1,9 @@
+type: agentcontact
+
+status:
+  class: exporter
+  stability:
+    development: [traces]
+  distributions: [contrib]
+  codeowners:
+    active: [open-telemetry/collector-approvers] 

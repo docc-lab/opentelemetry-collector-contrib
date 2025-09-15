@@ -1,0 +1,43 @@
+# Example configuration for Agent Contact components with upstream IP detection
+# This shows how to configure the exporter to dynamically select endpoints based on upstream.ip attribute
+
+receivers:
+  # OTLP Receiver for incoming traces
+  otlp:
+    protocols:
+      grpc:
+        endpoint: "0.0.0.0:4317"
+
+processors:
+  # Span Reconstruction Processor
+  spanreconstruction:
+    # processor configuration here
+
+exporters:
+  # Agent Contact Exporter with upstream IP detection
+  agentcontact:
+    default_port: 55679               # Port to use for all upstream connections
+    timeout: 30s
+    batch_size: 100
+    batch_timeout: 5s
+
+  # OTLP Exporter for output
+  otlp:
+    endpoint: "http://localhost:4318"
+
+service:
+  pipelines:
+    # Pipeline: Process spans and send trace IDs to upstream collectors
+    traces:
+      receivers: [otlp]
+      processors: [spanreconstruction]
+      exporters: [agentcontact]
+
+# How it works:
+# 1. Spans come in through the OTLP receiver
+# 2. The span reconstruction processor processes them
+# 3. The agent contact exporter extracts "upstream.ip" from span attributes
+# 4. For each unique upstream IP found, it creates an endpoint: {upstream.ip}:55679
+# 5. Trace IDs are grouped by upstream IP and sent to the appropriate endpoints
+# 6. Each upstream collector receives trace IDs for spans that originated from its IP address
+# 7. Each upstream IP gets its own dedicated batch manager with independent timing 

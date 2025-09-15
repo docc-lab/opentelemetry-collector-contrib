@@ -111,6 +111,7 @@ exporters:
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/exporter/syslogexporter v0.128.0
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/exporter/tencentcloudlogserviceexporter v0.128.0
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/exporter/zipkinexporter v0.128.0
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/exporter/agentcontactexporter v0.128.0
 
 processors:
   - gomod: go.opentelemetry.io/collector/processor/batchprocessor v0.128.1-0.20250624152751-a33fdf3cb754
@@ -135,6 +136,7 @@ processors:
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/processor/resourceprocessor v0.128.0
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/processor/routingprocessor v0.128.0
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/processor/spanreconstructionprocessor v0.128.0
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/processor/spanlookupprocessor v0.128.0
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/processor/sumologicprocessor v0.128.0
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/processor/schemaprocessor v0.128.0
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/processor/spanprocessor v0.128.0
@@ -179,7 +181,7 @@ receivers:
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/receiver/githubreceiver v0.128.0
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/receiver/googlecloudmonitoringreceiver v0.128.0
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/receiver/googlecloudpubsubreceiver v0.128.0
-  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/receiver/googlecloudspannerreceiver v0.128.0
+  # - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/receiver/googlecloudspannerreceiver v0.128.0
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/receiver/haproxyreceiver v0.128.0
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver v0.128.0
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/receiver/httpcheckreceiver v0.128.0
@@ -247,6 +249,8 @@ receivers:
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/receiver/windowseventlogreceiver v0.128.0
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/receiver/zipkinreceiver v0.128.0
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/receiver/zookeeperreceiver v0.128.0
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/receiver/agentcontactreceiver v0.128.0
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/receiver/ipdiscoveryreceiver v0.128.0
 
 connectors:
   - gomod: go.opentelemetry.io/collector/connector/forwardconnector v0.128.1-0.20250624152751-a33fdf3cb754

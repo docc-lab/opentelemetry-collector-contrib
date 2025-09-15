@@ -570,25 +570,25 @@ func TestSpanStorageAndMovement(t *testing.T) {
 			_, err = processor.processTraces(context.Background(), tt.startEvents)
 			require.NoError(t, err)
 
-			// Check that spans are in openSpans
-			processor.spansMutex.RLock()
-			openSpansCount := len(processor.openSpans)
-			closedSpansCount := len(processor.closedSpans)
-			processor.spansMutex.RUnlock()
+			// Check that spans are in OpenSpans
+			processor.SpansMutex.RLock()
+			OpenSpansCount := len(processor.OpenSpans)
+			ClosedSpansCount := len(processor.ClosedSpans)
+			processor.SpansMutex.RUnlock()
 
-			// After start events, spans should be in openSpans
-			assert.Equal(t, tt.startEvents.ResourceSpans().At(0).ScopeSpans().At(0).Spans().Len(), openSpansCount)
-			assert.Equal(t, 0, closedSpansCount)
+			// After start events, spans should be in OpenSpans
+			assert.Equal(t, tt.startEvents.ResourceSpans().At(0).ScopeSpans().At(0).Spans().Len(), OpenSpansCount)
+			assert.Equal(t, 0, ClosedSpansCount)
 
 			// Process end events
 			_, err = processor.processTraces(context.Background(), tt.endEvents)
 			require.NoError(t, err)
 
 			// Check final state
-			processor.spansMutex.RLock()
-			finalOpenSpans := len(processor.openSpans)
-			finalClosedSpans := len(processor.closedSpans)
-			processor.spansMutex.RUnlock()
+			processor.SpansMutex.RLock()
+			finalOpenSpans := len(processor.OpenSpans)
+			finalClosedSpans := len(processor.ClosedSpans)
+			processor.SpansMutex.RUnlock()
 
 			assert.Equal(t, tt.expectedOpen, finalOpenSpans)
 			assert.Equal(t, tt.expectedClosed, finalClosedSpans)
@@ -836,15 +836,15 @@ func TestTTLEviction(t *testing.T) {
 			_, err = processor.processTraces(context.Background(), tt.startEvents)
 			require.NoError(t, err)
 
-			// Process end events to move spans to closedSpans
+			// Process end events to move spans to ClosedSpans
 			_, err = processor.processTraces(context.Background(), tt.endEvents)
 			require.NoError(t, err)
 
-			// Check initial state - spans should be in closedSpans
-			processor.spansMutex.RLock()
-			initialOpenSpans := len(processor.openSpans)
-			initialClosedSpans := len(processor.closedSpans)
-			processor.spansMutex.RUnlock()
+			// Check initial state - spans should be in ClosedSpans
+			processor.SpansMutex.RLock()
+			initialOpenSpans := len(processor.OpenSpans)
+			initialClosedSpans := len(processor.ClosedSpans)
+			processor.SpansMutex.RUnlock()
 
 			assert.Equal(t, 0, initialOpenSpans)
 			assert.Equal(t, tt.expectedBefore, initialClosedSpans)
@@ -853,10 +853,10 @@ func TestTTLEviction(t *testing.T) {
 			time.Sleep(tt.waitTime)
 
 			// Check final state after TTL cleanup
-			processor.spansMutex.RLock()
-			finalOpenSpans := len(processor.openSpans)
-			finalClosedSpans := len(processor.closedSpans)
-			processor.spansMutex.RUnlock()
+			processor.SpansMutex.RLock()
+			finalOpenSpans := len(processor.OpenSpans)
+			finalClosedSpans := len(processor.ClosedSpans)
+			processor.SpansMutex.RUnlock()
 
 			assert.Equal(t, 0, finalOpenSpans)
 			assert.Equal(t, tt.expectedAfter, finalClosedSpans)
@@ -869,17 +869,17 @@ func TestTTLEviction(t *testing.T) {
 }
 
 // Helper function to get span IDs from processor state
-func getSpanIDs(processor *spanReconstructionProcessor) (openSpanIDs, closedSpanIDs []string) {
-	processor.spansMutex.RLock()
-	defer processor.spansMutex.RUnlock()
+func getSpanIDs(processor *SpanReconstructionProcessor) (openSpanIDs, closedSpanIDs []string) {
+	processor.SpansMutex.RLock()
+	defer processor.SpansMutex.RUnlock()
 
-	openSpanIDs = make([]string, 0, len(processor.openSpans))
-	for key := range processor.openSpans {
+	openSpanIDs = make([]string, 0, len(processor.OpenSpans))
+	for key := range processor.OpenSpans {
 		openSpanIDs = append(openSpanIDs, key)
 	}
 
-	closedSpanIDs = make([]string, 0, len(processor.closedSpans))
-	for key := range processor.closedSpans {
+	closedSpanIDs = make([]string, 0, len(processor.ClosedSpans))
+	for key := range processor.ClosedSpans {
 		closedSpanIDs = append(closedSpanIDs, key)
 	}
 
@@ -957,7 +957,7 @@ func TestLRUEviction(t *testing.T) {
 			},
 			expectedRetainedSpanIDs: []int{3, 4, 5}, // Newest spans should be retained
 			expectedEvictedSpanIDs:  []int{1, 2},    // Oldest spans should be evicted
-			description:             "All server spans closed - should evict oldest 2 from closedSpans",
+			description:             "All server spans closed - should evict oldest 2 from ClosedSpans",
 		},
 		{
 			name: "server_only_mixed_open_closed",
@@ -1028,7 +1028,7 @@ func TestLRUEviction(t *testing.T) {
 			},
 			expectedRetainedSpanIDs: []int{3, 4, 5}, // Newest spans should be retained
 			expectedEvictedSpanIDs:  []int{1, 2},    // Oldest spans should be evicted
-			description:             "All server spans open - should evict oldest 2 from openSpans",
+			description:             "All server spans open - should evict oldest 2 from OpenSpans",
 		},
 		// ===== SERVER + CLIENT SPANS TESTS =====
 		{
@@ -1201,7 +1201,7 @@ func TestLRUEviction(t *testing.T) {
 			},
 			expectedRetainedSpanIDs: []int{2, 12, 3, 13, 4, 14}, // Newest 3 server-client pairs
 			expectedEvictedSpanIDs:  []int{1, 11},               // Oldest server-client pair should be evicted
-			description:             "All server-client pairs open - should evict oldest 2 pairs from openSpans",
+			description:             "All server-client pairs open - should evict oldest 2 pairs from OpenSpans",
 		},
 		{
 			name: "server_with_variable_client_children",
@@ -1316,11 +1316,11 @@ func TestLRUEviction(t *testing.T) {
 			time.Sleep(100 * time.Millisecond)
 
 			// Check final state
-			processor.spansMutex.RLock()
-			finalOpenSpans := len(processor.openSpans)
-			finalClosedSpans := len(processor.closedSpans)
-			finalTotalSpans := processor.totalSpans
-			processor.spansMutex.RUnlock()
+			processor.SpansMutex.RLock()
+			finalOpenSpans := len(processor.OpenSpans)
+			finalClosedSpans := len(processor.ClosedSpans)
+			finalTotalSpans := processor.TotalSpans
+			processor.SpansMutex.RUnlock()
 
 			t.Logf("Final state: open=%d, closed=%d, total=%d", finalOpenSpans, finalClosedSpans, finalTotalSpans)
 
@@ -1359,3 +1359,115 @@ func TestLRUEviction(t *testing.T) {
 		})
 	}
 }
+
+/*
+func TestTracepointCreationWithLogging(t *testing.T) {
+	// Create a simple test with one server-side span
+	config := &Config{
+		MaxActiveSpans: 1000,
+		SpanTTL:        time.Hour,
+	}
+
+	// Create input traces with one server span that has start and end events
+	input := func() ptrace.Traces {
+		traces := ptrace.NewTraces()
+		resource := traces.ResourceSpans().AppendEmpty()
+
+		// Set service name for the resource
+		resource.Resource().Attributes().PutStr("service.name", "TestService")
+
+		scope := resource.ScopeSpans().AppendEmpty()
+		scope.Scope().SetName("test-scope")
+		scope.Scope().SetVersion("1.0.0")
+
+		// Start event for server span
+		startSpan := scope.Spans().AppendEmpty()
+		startSpan.SetTraceID(pcommon.TraceID([16]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}))
+		startSpan.SetSpanID(pcommon.SpanID([8]byte{1, 2, 3, 4, 5, 6, 7, 8}))
+		startSpan.SetKind(ptrace.SpanKindServer) // Server span
+		startSpan.SetStartTimestamp(pcommon.Timestamp(1000))
+		startSpan.SetName("test-server-span")
+
+		// End event for the same server span
+		endSpan := scope.Spans().AppendEmpty()
+		endSpan.SetTraceID(pcommon.TraceID([16]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}))
+		endSpan.SetSpanID(pcommon.SpanID([8]byte{1, 2, 3, 4, 5, 6, 7, 8}))
+		endSpan.SetKind(ptrace.SpanKindServer) // Server span
+		endSpan.SetEndTimestamp(pcommon.Timestamp(2000))
+		endSpan.SetName("test-server-span")
+
+		return traces
+	}()
+
+	// Create processor with detailed logging
+	logger := zap.NewExample() // Use real logger to see all the zap logs
+	processor := newSpanReconstructionProcessor(logger, config)
+
+	// Create sink
+	sink := new(consumertest.TracesSink)
+
+	// Create processor with sink
+	tp, err := processorhelper.NewTraces(
+		context.Background(),
+		processortest.NewNopSettings(metadata.Type),
+		config,
+		sink,
+		processor.processTraces,
+		processorhelper.WithStart(processor.start),
+		processorhelper.WithShutdown(processor.shutdown),
+	)
+	require.NoError(t, err)
+
+	// Start processor
+	err = tp.Start(context.Background(), componenttest.NewNopHost())
+	require.NoError(t, err)
+
+	// Process traces
+	err = tp.ConsumeTraces(context.Background(), input)
+	require.NoError(t, err)
+
+	// Process empty traces to trigger output of completed spans
+	err = tp.ConsumeTraces(context.Background(), ptrace.NewTraces())
+	require.NoError(t, err)
+
+	// Shutdown processor
+	err = tp.Shutdown(context.Background())
+	require.NoError(t, err)
+
+	// Wait a bit for any async operations to complete
+	time.Sleep(100 * time.Millisecond)
+
+	// Check that tracepoints were created
+	assert.Equal(t, 2, len(processor.tracepoints), "Should have created 2 tracepoints (START and END)")
+
+	// Verify the tracepoints
+	startTracepointID := "0102030405060708_START"
+	endTracepointID := "0102030405060708_END"
+
+	startTracepoint, exists := processor.tracepoints[startTracepointID]
+	assert.True(t, exists, "START tracepoint should exist")
+	assert.Equal(t, "TestService_test-server-span_START", startTracepoint.Name)
+	assert.Equal(t, "0102030405060708", startTracepoint.ServerSpanID)
+	assert.Equal(t, "0102030405060708090a0b0c0d0e0f10", startTracepoint.TraceID)
+	assert.Equal(t, "TestService", startTracepoint.Service, "Service should be populated from resource")
+
+	endTracepoint, exists := processor.tracepoints[endTracepointID]
+	assert.True(t, exists, "END tracepoint should exist")
+	assert.Equal(t, "TestService_test-server-span_END", endTracepoint.Name)
+	assert.Equal(t, "0102030405060708", endTracepoint.ServerSpanID)
+	assert.Equal(t, "0102030405060708090a0b0c0d0e0f10", endTracepoint.TraceID)
+	assert.Equal(t, "TestService", endTracepoint.Service, "Service should be populated from resource")
+
+	// Log the tracepoints for inspection
+	t.Logf("Created tracepoints:")
+	for id, tracepoint := range processor.tracepoints {
+		t.Logf("  ID: %s, Name: %s, Service: %s, ServerSpanID: %s, TraceID: %s, Timestamp: %v",
+			id, tracepoint.Name, tracepoint.Service, tracepoint.ServerSpanID, tracepoint.TraceID, tracepoint.Timestamp)
+	}
+
+	// Check that the span was reconstructed and output
+	allTraces := sink.AllTraces()
+	assert.GreaterOrEqual(t, len(allTraces), 1, "Should have output at least 1 trace")
+	assert.True(t, len(allTraces) > 0, "Should have output traces")
+}
+*/
