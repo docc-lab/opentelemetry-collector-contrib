@@ -44,7 +44,7 @@ func createTracesProcessor(
 	nextConsumer consumer.Traces,
 ) (processor.Traces, error) {
 	oCfg := cfg.(*Config)
-	sp := newSpanReconstructionProcessor(set.Logger, oCfg)
+	sp := newSpanReconstructionProcessor(set.Logger, oCfg, nextConsumer)
 	return processorhelper.NewTraces(
 		ctx,
 		set,
