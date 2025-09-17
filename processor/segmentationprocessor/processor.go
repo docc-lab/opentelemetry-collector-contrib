@@ -24,6 +24,16 @@ type ServerSpan struct {
 	FirstSeen time.Time
 }
 
+// Segment represents a time-based segment of work within a server span
+type Segment struct {
+	// Service name + span operation name (e.g., "user-service:process-payment")
+	ServiceOperation string
+	// Starting endpoint (e.g., "process-payment:START" or "process-payment:END")
+	StartEndpoint string
+	// Ending endpoint (e.g., "process-payment:START" or "process-payment:END")
+	EndEndpoint string
+}
+
 // SpanWithContext holds a span with its resource and scope context
 type SpanWithContext struct {
 	Span     ptrace.Span
@@ -72,6 +82,10 @@ type segmentationProcessor struct {
 	// Worker control
 	stopWorker chan struct{}
 	workerWg   sync.WaitGroup
+
+	// Segmentation worker control
+	stopSegmentationWorker chan struct{}
+	segmentationWorkerWg   sync.WaitGroup
 }
 
 // newSegmentationProcessor creates a new segmentation processor
@@ -89,7 +103,8 @@ func newSegmentationProcessor(logger *zap.Logger, config *Config, nextConsumer c
 		eventBuffer: &EventBuffer{
 			events: make([]SpanWithContext, 0),
 		},
-		stopWorker: make(chan struct{}),
+		stopWorker:             make(chan struct{}),
+		stopSegmentationWorker: make(chan struct{}),
 	}
 
 	return sp
@@ -137,6 +152,10 @@ func (sp *segmentationProcessor) start(ctx context.Context, host component.Host)
 	sp.workerWg.Add(1)
 	go sp.workerLoop()
 
+	// Start segmentation worker goroutine
+	sp.segmentationWorkerWg.Add(1)
+	go sp.segmentationWorkerLoop()
+
 	// Start periodic counter logging
 	go sp.logCounters()
 
@@ -168,9 +187,12 @@ func (sp *segmentationProcessor) logCounters() {
 func (sp *segmentationProcessor) shutdown(ctx context.Context) error {
 	sp.logger.Info("Shutting down segmentation processor")
 
-	// Stop worker
+	// Stop workers
 	close(sp.stopWorker)
 	sp.workerWg.Wait()
+
+	close(sp.stopSegmentationWorker)
+	sp.segmentationWorkerWg.Wait()
 
 	return nil
 }
@@ -304,8 +326,10 @@ func (sp *segmentationProcessor) handleServerSpan(spanWithContext SpanWithContex
 	}
 
 	// Store the server span
+	sp.spansMutex.Lock()
 	sp.serverSpans[spanKey] = serverSpan
 	sp.spanTimestamps[spanKey] = time.Now()
+	sp.spansMutex.Unlock()
 
 	sp.logger.Debug("Added server span",
 		zap.String("span_key", spanKey),
@@ -356,4 +380,206 @@ func (sp *segmentationProcessor) handleClientSpan(spanWithContext SpanWithContex
 			zap.String("span_name", span.Name()),
 			zap.Int64("total_client_spans", sp.clientSpanCount))
 	}
+}
+
+// segmentationWorkerLoop processes completed server spans for segmentation
+func (sp *segmentationProcessor) segmentationWorkerLoop() {
+	defer sp.segmentationWorkerWg.Done()
+
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-sp.stopSegmentationWorker:
+			return
+		case <-ticker.C:
+			sp.segmentSpans()
+		}
+	}
+}
+
+// segmentSpans processes completed server spans and creates segments
+func (sp *segmentationProcessor) segmentSpans() {
+	// Get current timestamp
+	currentTime := time.Now()
+
+	// Lock around the serverSpans data structure
+	sp.spansMutex.Lock()
+
+	// Create temporary structure for spans to segment
+	toSegment := make([]ServerSpan, 0)
+
+	// Iterate through all server spans
+	for spanKey, serverSpan := range sp.serverSpans {
+		// Check if the server span's last time seen is more than 100ms before current timestamp
+		lastSeenTime := sp.spanTimestamps[spanKey]
+		if currentTime.Sub(lastSeenTime) >= 100*time.Millisecond {
+			// Add to segmentation queue
+			toSegment = append(toSegment, serverSpan)
+
+			// Remove from serverSpans data structure
+			delete(sp.serverSpans, spanKey)
+			delete(sp.spanTimestamps, spanKey)
+		}
+	}
+
+	// Unlock around the serverSpans structure
+	sp.spansMutex.Unlock()
+
+	// Process each entry in toSegment
+	for _, serverSpan := range toSegment {
+		segments := createSegments(serverSpan)
+
+		// Log the segments for debugging
+		sp.logger.Debug("Created segments for server span",
+			zap.String("span_name", serverSpan.Span.Span.Name()),
+			zap.Int("segment_count", len(segments)))
+
+		// TODO: Process or emit the segments as needed
+		_ = segments // Placeholder to avoid unused variable warning
+	}
+}
+
+// createSegments analyzes a completed ServerSpan and creates segments representing
+// on-service and off-service work periods
+func createSegments(serverSpan ServerSpan) []Segment {
+	segments := make([]Segment, 0)
+
+	// Get server span details
+	serverSpanData := serverSpan.Span.Span
+	serverSpanName := serverSpanData.Name()
+
+	// Extract service name from resource attributes
+	attrs := serverSpan.Span.Resource.Resource().Attributes().AsRaw()
+	serviceName := "unknown-service"
+	if serviceNameValue, ok := attrs["service.name"].(string); ok {
+		serviceName = serviceNameValue
+	}
+
+	// Create service operation identifier
+	serviceOperation := serviceName + ":" + serverSpanName
+
+	// Get server span timing
+	serverStartTime := serverSpanData.StartTimestamp().AsTime()
+	serverEndTime := serverSpanData.EndTimestamp().AsTime()
+
+	// If no client spans, the entire server span is one on-service segment
+	if len(serverSpan.ChildSpans) == 0 {
+		segment := Segment{
+			ServiceOperation: serviceOperation,
+			StartEndpoint:    serverSpanName + ":START",
+			EndEndpoint:      serverSpanName + ":END",
+		}
+		segments = append(segments, segment)
+		return segments
+	}
+
+	// Create timeline events for server span and all client spans
+	type TimelineEvent struct {
+		Time     time.Time
+		IsStart  bool
+		IsServer bool
+		Name     string
+	}
+
+	events := make([]TimelineEvent, 0)
+
+	// Add server span events
+	events = append(events, TimelineEvent{
+		Time:     serverStartTime,
+		IsStart:  true,
+		IsServer: true,
+		Name:     serverSpanName,
+	})
+	events = append(events, TimelineEvent{
+		Time:     serverEndTime,
+		IsStart:  false,
+		IsServer: true,
+		Name:     serverSpanName,
+	})
+
+	// Add client span events
+	for _, childSpan := range serverSpan.ChildSpans {
+		clientSpan := childSpan.Span
+		clientStartTime := clientSpan.StartTimestamp().AsTime()
+		clientEndTime := clientSpan.EndTimestamp().AsTime()
+
+		events = append(events, TimelineEvent{
+			Time:     clientStartTime,
+			IsStart:  true,
+			IsServer: false,
+			Name:     clientSpan.Name(),
+		})
+		events = append(events, TimelineEvent{
+			Time:     clientEndTime,
+			IsStart:  false,
+			IsServer: false,
+			Name:     clientSpan.Name(),
+		})
+	}
+
+	// Sort events by time
+	for i := 0; i < len(events)-1; i++ {
+		for j := i + 1; j < len(events); j++ {
+			if events[i].Time.After(events[j].Time) {
+				events[i], events[j] = events[j], events[i]
+			}
+		}
+	}
+
+	// Track active client spans
+	activeClientSpans := 0
+	currentSegmentStart := serverStartTime
+	isOnService := true
+
+	// Process events to create segments
+	for _, event := range events {
+		// Skip events outside server span bounds
+		if event.Time.Before(serverStartTime) || event.Time.After(serverEndTime) {
+			continue
+		}
+
+		// Update active client span count
+		if !event.IsServer {
+			if event.IsStart {
+				activeClientSpans++
+			} else {
+				activeClientSpans--
+			}
+		}
+
+		// Determine if we're transitioning between on-service and off-service
+		wasOnService := isOnService
+		isOnService = (activeClientSpans == 0)
+
+		// If we're transitioning or this is the server end event, create a segment
+		if wasOnService != isOnService || (!event.IsStart && event.IsServer) {
+			segmentType := "ON-SERVICE"
+			if !wasOnService {
+				segmentType = "OFF-SERVICE"
+			}
+
+			startEndpoint := serverSpanName + ":START"
+			if currentSegmentStart != serverStartTime {
+				startEndpoint = serverSpanName + ":END"
+			}
+
+			endEndpoint := serverSpanName + ":END"
+			if event.Time != serverEndTime {
+				endEndpoint = serverSpanName + ":START"
+			}
+
+			segment := Segment{
+				ServiceOperation: serviceOperation + ":" + segmentType,
+				StartEndpoint:    startEndpoint,
+				EndEndpoint:      endEndpoint,
+			}
+			segments = append(segments, segment)
+
+			currentSegmentStart = event.Time
+		}
+	}
+
+	return segments
 }
