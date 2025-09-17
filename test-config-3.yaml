@@ -1,0 +1,78 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+  
+  # IP Discovery Receiver for exposing agent's own IP address
+  ipdiscovery:
+    endpoint: ":8080"
+  
+  # Agent Contact Receiver for receiving trace ID requests from upstream collectors
+  agentcontact:
+    endpoint: 0.0.0.0:55679
+
+processors:
+  # Span Reconstruction Processor for handling fragmented spans
+  spanreconstruction:
+    max_active_spans: 1000
+    span_ttl: 1h
+    enable_metrics: false
+  
+  # Span Lookup Processor for querying shared memory and emitting specific spans
+  spanlookup:
+    # Configuration options for span lookup functionality
+    max_lookups: 50
+    enable_metrics: true
+  
+  # Segmentation Processor for segmenting spans into time-based segments
+  segmentation:
+    # Configuration options for segmentation functionality
+    # Add configuration fields here as needed
+
+exporters:
+  # Debug exporter for development and testing
+  debug:
+    verbosity: detailed
+  
+  # Agent Contact Exporter for sending trace IDs to upstream collectors
+  agentcontact:
+    default_port: 55679
+    timeout: 30s
+    batch_size: 100
+    batch_timeout: 5s
+  
+  # OTLP exporter for sending processed spans to downstream systems
+  otlp:
+    endpoint: "http://localhost:4317"
+    tls:
+      insecure: true
+
+service:
+  telemetry:
+    logs:
+      level: DEBUG
+  
+  # Pipeline 1: Span Processing and Agent Contact
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [spanreconstruction, segmentation]
+      exporters: [debug, agentcontact]
+    
+    # Pipeline 2: Span Lookup and Response
+    traces/lookup:
+      receivers: [agentcontact]
+      processors: [spanlookup]
+      exporters: [otlp, debug]
+    
+    # Pipeline 3: IP Discovery Service
+    logs/ipdiscovery:
+      receivers: [ipdiscovery]
+      processors: []
+      exporters: [debug]
+  
+  # Extensions for additional functionality
+  extensions: []
