@@ -4,5 +4,8 @@ status:
   class: processor
   stability:
     development: [traces]
+  distributions: [contrib]
   codeowners:
     active: [tomislavzm]
+tests:
+  config: {}

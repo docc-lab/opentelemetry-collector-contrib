@@ -223,8 +223,7 @@ func (sp *segmentationProcessor) processEventBuffer() {
 		return
 	}
 
-	sp.spansMutex.Lock()
-	defer sp.spansMutex.Unlock()
+	sp.logger.Info("Processing event buffer", zap.Int("event_count", len(currentEvents)))
 
 	// Process each event
 	for _, eventWithContext := range currentEvents {
@@ -292,10 +291,23 @@ func (sp *segmentationProcessor) processSpan(spanWithContext SpanWithContext) {
 	span := spanWithContext.Span
 	spanKey := sp.getSpanKey(span)
 
+	// Log span details for debugging
+	sp.logger.Info("Processing span",
+		zap.String("span_name", span.Name()),
+		zap.String("span_kind", span.Kind().String()),
+		zap.String("trace_id", span.TraceID().String()),
+		zap.String("span_id", span.SpanID().String()),
+		zap.Bool("is_server", sp.isServerSpan(span)),
+		zap.Bool("is_client", sp.isClientSpan(span)))
+
 	if sp.isServerSpan(span) {
 		sp.handleServerSpan(spanWithContext, spanKey)
 	} else if sp.isClientSpan(span) {
 		sp.handleClientSpan(spanWithContext, spanKey)
+	} else {
+		sp.logger.Info("Span not classified as server or client",
+			zap.String("span_name", span.Name()),
+			zap.String("span_kind", span.Kind().String()))
 	}
 }
 
@@ -331,7 +343,7 @@ func (sp *segmentationProcessor) handleServerSpan(spanWithContext SpanWithContex
 	sp.spanTimestamps[spanKey] = time.Now()
 	sp.spansMutex.Unlock()
 
-	sp.logger.Debug("Added server span",
+	sp.logger.Info("Added server span",
 		zap.String("span_key", spanKey),
 		zap.String("span_name", span.Name()),
 		zap.Int("child_spans_count", len(serverSpan.ChildSpans)),
@@ -386,12 +398,14 @@ func (sp *segmentationProcessor) handleClientSpan(spanWithContext SpanWithContex
 func (sp *segmentationProcessor) segmentationWorkerLoop() {
 	defer sp.segmentationWorkerWg.Done()
 
+	sp.logger.Info("Starting segmentation worker loop")
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-sp.stopSegmentationWorker:
+			sp.logger.Info("Stopping segmentation worker loop")
 			return
 		case <-ticker.C:
 			sp.segmentSpans()
@@ -427,12 +441,18 @@ func (sp *segmentationProcessor) segmentSpans() {
 	// Unlock around the serverSpans structure
 	sp.spansMutex.Unlock()
 
+	// Log if we have spans to segment
+	if len(toSegment) > 0 {
+		sp.logger.Info("Processing spans for segmentation",
+			zap.Int("spans_to_segment", len(toSegment)))
+	}
+
 	// Process each entry in toSegment
 	for _, serverSpan := range toSegment {
 		segments := createSegments(serverSpan)
 
 		// Log the segments for debugging
-		sp.logger.Debug("Created segments for server span",
+		sp.logger.Info("Created segments for server span",
 			zap.String("span_name", serverSpan.Span.Span.Name()),
 			zap.Int("segment_count", len(segments)))
 

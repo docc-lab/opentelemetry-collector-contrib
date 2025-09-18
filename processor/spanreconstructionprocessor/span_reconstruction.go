@@ -397,8 +397,8 @@ func (p *SpanReconstructionProcessor) processEventBuffer() {
 
 	// duplicatedSpanIDs := 0
 
-	processedSum := 0
-	unprocessedSum := 0
+	// processedSum := 0
+	// unprocessedSum := 0
 
 	// Process each event
 	for _, eventWithContext := range currentEvents {
@@ -426,10 +426,10 @@ func (p *SpanReconstructionProcessor) processEventBuffer() {
 	// 	unprocessedSum += event.FlowID
 	// }
 
-	p.logger.Info("🟢 INFO: Processed/Unprocessed/Total",
-		zap.Int("processed_sum", processedSum),
-		zap.Int("unprocessed_sum", unprocessedSum),
-		zap.Int("processed_sum + unprocessed_sum", processedSum+unprocessedSum))
+	// p.logger.Info("🟢 INFO: Processed/Unprocessed/Total",
+	// 	zap.Int("processed_sum", processedSum),
+	// 	zap.Int("unprocessed_sum", unprocessedSum),
+	// 	zap.Int("processed_sum + unprocessed_sum", processedSum+unprocessedSum))
 
 	// p.SpansDuplicated += duplicatedSpanIDs
 
