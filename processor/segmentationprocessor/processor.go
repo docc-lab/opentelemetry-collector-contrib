@@ -175,7 +175,7 @@ func (sp *segmentationProcessor) logCounters() {
 		serverSpansCount := len(sp.serverSpans)
 		// sp.spansMutex.RUnlock()
 
-		sp.logger.Info("Segmentation processor counters",
+		sp.logger.Info("Segmentation processor counters:",
 			zap.Int64("total_server_spans_processed", serverCount),
 			zap.Int64("total_client_spans_processed", clientCount),
 			zap.Int("waiting_client_spans", waitingCount),
