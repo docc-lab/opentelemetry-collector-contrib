@@ -5,11 +5,18 @@ package segmentationprocessor
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/HdrHistogram/hdrhistogram-go"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/consumer"
+	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/ptrace"
 	"go.uber.org/zap"
 )
@@ -32,6 +39,34 @@ type Segment struct {
 	StartEndpoint string
 	// Ending endpoint (e.g., "process-payment:START" or "process-payment:END")
 	EndEndpoint string
+	// Start time of this segment
+	StartTime time.Time
+	// End time of this segment
+	EndTime time.Time
+}
+
+// SegmentDistribution tracks latency distribution for a segment using HDR Histogram
+type SegmentDistribution struct {
+	histogram  *hdrhistogram.Histogram
+	count      int64
+	sum        float64
+	lastUpdate time.Time
+}
+
+// PointBasedDetector implements change detection based on percentiles
+type PointBasedDetector struct {
+	distributions map[string]*SegmentDistribution
+	mu            sync.RWMutex
+	percentile    float64
+	minSamples    int64
+}
+
+// ChangeInfo contains information about detected changes
+type ChangeInfo struct {
+	IsChange   bool
+	Confidence float64
+	ChangeType string
+	Details    map[string]interface{}
 }
 
 // SpanWithContext holds a span with its resource and scope context
@@ -73,8 +108,10 @@ type segmentationProcessor struct {
 	spanTimestamps map[string]time.Time
 
 	// Counters for tracking span types
-	serverSpanCount int64
-	clientSpanCount int64
+	serverSpanCount    int64
+	clientSpanCount    int64
+	segmentedSpanCount int64
+	segmentedSpanNames []string
 
 	// Event buffer for handling spans asynchronously
 	eventBuffer *EventBuffer
@@ -86,6 +123,9 @@ type segmentationProcessor struct {
 	// Segmentation worker control
 	stopSegmentationWorker chan struct{}
 	segmentationWorkerWg   sync.WaitGroup
+
+	// Change detection
+	changeDetector *PointBasedDetector
 }
 
 // newSegmentationProcessor creates a new segmentation processor
@@ -100,11 +140,14 @@ func newSegmentationProcessor(logger *zap.Logger, config *Config, nextConsumer c
 		spanTimestamps:     make(map[string]time.Time),
 		serverSpanCount:    0,
 		clientSpanCount:    0,
+		segmentedSpanCount: 0,
+		segmentedSpanNames: make([]string, 0),
 		eventBuffer: &EventBuffer{
 			events: make([]SpanWithContext, 0),
 		},
 		stopWorker:             make(chan struct{}),
 		stopSegmentationWorker: make(chan struct{}),
+		changeDetector:         NewPointBasedDetector(config.ChangeDetectionPercentile, config.MinSamples),
 	}
 
 	return sp
@@ -139,9 +182,8 @@ func (sp *segmentationProcessor) processTraces(ctx context.Context, td ptrace.Tr
 	sp.logger.Debug("Added spans to event buffer",
 		zap.Int("spans_added", len(allSpansWithContext)))
 
-	// Return empty traces - output will be handled independently by worker loop
-	// return ptrace.NewTraces(), nil
-	return td, nil
+	// Return empty traces - segment spans will be output independently by worker loop
+	return ptrace.NewTraces(), nil
 }
 
 // start is called when the processor starts
@@ -159,6 +201,9 @@ func (sp *segmentationProcessor) start(ctx context.Context, host component.Host)
 	// Start periodic counter logging
 	go sp.logCounters()
 
+	// Start periodic histogram stats logging
+	go sp.logHistogramStats()
+
 	return nil
 }
 
@@ -175,11 +220,48 @@ func (sp *segmentationProcessor) logCounters() {
 		serverSpansCount := len(sp.serverSpans)
 		// sp.spansMutex.RUnlock()
 
+		segmentedSpanNames := strings.Join(sp.segmentedSpanNames, ", ")
+
 		sp.logger.Info("Segmentation processor counters:",
 			zap.Int64("total_server_spans_processed", serverCount),
 			zap.Int64("total_client_spans_processed", clientCount),
 			zap.Int("waiting_client_spans", waitingCount),
-			zap.Int("active_server_spans", serverSpansCount))
+			zap.Int("active_server_spans", serverSpansCount),
+			zap.Int64("total_segmented_spans", sp.segmentedSpanCount),
+			zap.String("segment_span_names", segmentedSpanNames),
+		)
+	}
+}
+
+// logHistogramStats periodically logs histogram statistics
+func (sp *segmentationProcessor) logHistogramStats() {
+	ticker := time.NewTicker(10 * time.Second) // Log every 10 seconds
+	defer ticker.Stop()
+
+	for range ticker.C {
+		stats := sp.changeDetector.DumpStats()
+		sp.logger.Info("Histogram statistics:",
+			zap.Any("stats", stats))
+	}
+}
+
+// DumpHistogramStats manually dumps histogram statistics (for debugging)
+func (sp *segmentationProcessor) DumpHistogramStats() map[string]interface{} {
+	return sp.changeDetector.DumpStats()
+}
+
+// DumpSegmentStats dumps histogram statistics for a specific segment
+func (sp *segmentationProcessor) DumpSegmentStats(segmentID string) map[string]interface{} {
+	sp.changeDetector.mu.RLock()
+	defer sp.changeDetector.mu.RUnlock()
+
+	if dist, exists := sp.changeDetector.distributions[segmentID]; exists {
+		return dist.GetStats()
+	}
+
+	return map[string]interface{}{
+		"error":      "segment not found",
+		"segment_id": segmentID,
 	}
 }
 
@@ -301,8 +383,13 @@ func (sp *segmentationProcessor) processSpan(spanWithContext SpanWithContext) {
 		zap.Bool("is_client", sp.isClientSpan(span)))
 
 	if sp.isServerSpan(span) {
+		sp.logger.Info("Routing to handleServerSpan",
+			zap.String("span_name", span.Name()),
+			zap.String("trace_id", span.TraceID().String()),
+			zap.String("span_id", span.SpanID().String()))
 		sp.handleServerSpan(spanWithContext, spanKey)
 	} else if sp.isClientSpan(span) {
+		sp.logger.Info("Routing to handleClientSpan", zap.String("span_name", span.Name()))
 		sp.handleClientSpan(spanWithContext, spanKey)
 	} else {
 		sp.logger.Info("Span not classified as server or client",
@@ -314,6 +401,13 @@ func (sp *segmentationProcessor) processSpan(spanWithContext SpanWithContext) {
 // handleServerSpan processes server-side spans
 func (sp *segmentationProcessor) handleServerSpan(spanWithContext SpanWithContext, spanKey string) {
 	span := spanWithContext.Span
+
+	sp.logger.Info("Entering handleServerSpan",
+		zap.String("span_name", span.Name()),
+		zap.String("span_key", spanKey),
+		zap.String("trace_id", span.TraceID().String()),
+		zap.String("span_id", span.SpanID().String()))
+
 	// Increment server span counter
 	sp.serverSpanCount++
 
@@ -375,6 +469,7 @@ func (sp *segmentationProcessor) handleClientSpan(spanWithContext SpanWithContex
 			zap.String("client_span_key", spanKey),
 			zap.String("parent_span_key", parentSpanKey),
 			zap.String("parent_span_name", parentServerSpan.Span.Span.Name()),
+			zap.String("span_name", span.Name()),
 			zap.Int64("total_client_spans", sp.clientSpanCount))
 	} else {
 		// Parent doesn't exist yet, add to waiting list
@@ -449,15 +544,48 @@ func (sp *segmentationProcessor) segmentSpans() {
 
 	// Process each entry in toSegment
 	for _, serverSpan := range toSegment {
+		// sp.segmentedSpanCount++
+		sp.logger.Info("Creating segments for server span",
+			zap.String("span_name", serverSpan.Span.Span.Name()),
+			zap.String("trace_id", serverSpan.Span.Span.TraceID().String()),
+			zap.String("span_id", serverSpan.Span.Span.SpanID().String()))
+
 		segments := createSegments(serverSpan)
+
+		sp.logger.Info("Generated segments",
+			zap.String("span_name", serverSpan.Span.Span.Name()),
+			zap.Int("segment_count", len(segments)))
 
 		// Log the segments for debugging
 		sp.logger.Info("Created segments for server span",
 			zap.String("span_name", serverSpan.Span.Span.Name()),
 			zap.Int("segment_count", len(segments)))
 
-		// TODO: Process or emit the segments as needed
-		_ = segments // Placeholder to avoid unused variable warning
+		// Create and output segment spans
+		segmentSpans := make([]ptrace.Span, 0, len(segments))
+		for _, segment := range segments {
+			latency := segment.LatencyMs()
+
+			// Check if segment is "bad"
+			isBad := sp.isSegmentBad(segment, latency)
+
+			sp.logger.Info("Segment analysis",
+				zap.String("segment_id", segment.String()),
+				zap.Float64("latency_ms", latency),
+				zap.Bool("is_bad", isBad))
+
+			// Create segment span
+			segmentSpan := sp.createSegmentSpan(segment, serverSpan, isBad, latency)
+			segmentSpans = append(segmentSpans, segmentSpan)
+		}
+
+		// Output segment spans to next consumer
+		if len(segmentSpans) > 0 {
+			sp.outputSegmentSpans(segmentSpans, serverSpan)
+		}
+
+		sp.segmentedSpanCount++
+		sp.segmentedSpanNames = append(sp.segmentedSpanNames, serverSpan.Span.Span.Name())
 	}
 }
 
@@ -478,7 +606,7 @@ func createSegments(serverSpan ServerSpan) []Segment {
 	}
 
 	// Create service operation identifier
-	serviceOperation := serviceName + ":" + serverSpanName
+	serviceOperation := serviceName + "__" + serverSpanName
 
 	// Get server span timing
 	serverStartTime := serverSpanData.StartTimestamp().AsTime()
@@ -488,8 +616,10 @@ func createSegments(serverSpan ServerSpan) []Segment {
 	if len(serverSpan.ChildSpans) == 0 {
 		segment := Segment{
 			ServiceOperation: serviceOperation,
-			StartEndpoint:    serverSpanName + ":START",
-			EndEndpoint:      serverSpanName + ":END",
+			StartEndpoint:    serverSpanName + "_START",
+			EndEndpoint:      serverSpanName + "_END",
+			StartTime:        serverStartTime,
+			EndTime:          serverEndTime,
 		}
 		segments = append(segments, segment)
 		return segments
@@ -505,18 +635,12 @@ func createSegments(serverSpan ServerSpan) []Segment {
 
 	events := make([]TimelineEvent, 0)
 
-	// Add server span events
+	// Add server start event first (will be at index 0)
 	events = append(events, TimelineEvent{
 		Time:     serverStartTime,
 		IsStart:  true,
 		IsServer: true,
-		Name:     serverSpanName,
-	})
-	events = append(events, TimelineEvent{
-		Time:     serverEndTime,
-		IsStart:  false,
-		IsServer: true,
-		Name:     serverSpanName,
+		Name:     serverSpanName + "_START",
 	})
 
 	// Add client span events
@@ -529,32 +653,37 @@ func createSegments(serverSpan ServerSpan) []Segment {
 			Time:     clientStartTime,
 			IsStart:  true,
 			IsServer: false,
-			Name:     clientSpan.Name(),
+			Name:     clientSpan.Name() + "_START",
 		})
 		events = append(events, TimelineEvent{
 			Time:     clientEndTime,
 			IsStart:  false,
 			IsServer: false,
-			Name:     clientSpan.Name(),
+			Name:     clientSpan.Name() + "_END",
 		})
 	}
 
-	// Sort events by time
-	for i := 0; i < len(events)-1; i++ {
-		for j := i + 1; j < len(events); j++ {
-			if events[i].Time.After(events[j].Time) {
-				events[i], events[j] = events[j], events[i]
-			}
-		}
-	}
+	// Sort only the client events (events[1:] to skip server start event)
+	sort.Slice(events[1:], func(i, j int) bool {
+		return events[i+1].Time.Before(events[j+1].Time)
+	})
 
-	// Track active client spans
+	// Append server end event (ensures it comes last)
+	events = append(events, TimelineEvent{
+		Time:     serverEndTime,
+		IsStart:  false,
+		IsServer: true,
+		Name:     serverSpanName + "_END",
+	})
+
+	// Track active client spans and segment creation
 	activeClientSpans := 0
 	currentSegmentStart := serverStartTime
 	isOnService := true
+	previousEvent := events[0] // Start with server start event
 
 	// Process events to create segments
-	for _, event := range events {
+	for _, event := range events[1:] {
 		// Skip events outside server span bounds
 		if event.Time.Before(serverStartTime) || event.Time.After(serverEndTime) {
 			continue
@@ -575,31 +704,269 @@ func createSegments(serverSpan ServerSpan) []Segment {
 
 		// If we're transitioning or this is the server end event, create a segment
 		if wasOnService != isOnService || (!event.IsStart && event.IsServer) {
-			segmentType := "ON-SERVICE"
-			if !wasOnService {
-				segmentType = "OFF-SERVICE"
-			}
+			// Only create segments for on-service periods
+			if wasOnService {
+				// Determine start and end endpoints
+				var startEndpoint, endEndpoint string
 
-			startEndpoint := serverSpanName + ":START"
-			if currentSegmentStart != serverStartTime {
-				startEndpoint = serverSpanName + ":END"
-			}
+				if currentSegmentStart.Equal(serverStartTime) {
+					// First segment starts with server start event
+					startEndpoint = events[0].Name
+				} else {
+					// Use the previous event as the start endpoint
+					startEndpoint = previousEvent.Name
+				}
 
-			endEndpoint := serverSpanName + ":END"
-			if event.Time != serverEndTime {
-				endEndpoint = serverSpanName + ":START"
-			}
+				// End endpoint is always the current event name
+				endEndpoint = event.Name
 
-			segment := Segment{
-				ServiceOperation: serviceOperation + ":" + segmentType,
-				StartEndpoint:    startEndpoint,
-				EndEndpoint:      endEndpoint,
+				segment := Segment{
+					ServiceOperation: serviceOperation,
+					StartEndpoint:    startEndpoint,
+					EndEndpoint:      endEndpoint,
+					StartTime:        currentSegmentStart,
+					EndTime:          event.Time,
+				}
+				segments = append(segments, segment)
 			}
-			segments = append(segments, segment)
 
 			currentSegmentStart = event.Time
 		}
+
+		// Update previous event for next iteration
+		previousEvent = event
 	}
 
 	return segments
+}
+
+// NewSegmentDistribution creates a new segment distribution with HDR histogram
+func NewSegmentDistribution() *SegmentDistribution {
+	// HDR histogram: 1 microsecond to 1 hour, 3 significant digits
+	histogram := hdrhistogram.New(1, 3600000000, 3) // 1μs to 1h in microseconds
+	return &SegmentDistribution{
+		histogram:  histogram,
+		count:      0,
+		sum:        0,
+		lastUpdate: time.Now(),
+	}
+}
+
+// Add adds a latency value to the distribution (latency in milliseconds)
+func (sd *SegmentDistribution) Add(latencyMs float64) {
+	// Convert milliseconds to microseconds for HDR histogram
+	latencyMicros := int64(latencyMs * 1000)
+	sd.histogram.RecordValue(latencyMicros)
+	sd.count++
+	sd.sum += latencyMs
+	sd.lastUpdate = time.Now()
+}
+
+// Percentile returns the percentile value in milliseconds
+func (sd *SegmentDistribution) Percentile(percentile float64) float64 {
+	if sd.count == 0 {
+		return 0
+	}
+	// Get percentile from HDR histogram (returns microseconds)
+	valueMicros := sd.histogram.ValueAtQuantile(percentile * 100)
+	// Convert back to milliseconds
+	return float64(valueMicros) / 1000.0
+}
+
+// GetStats returns histogram statistics for debugging
+func (sd *SegmentDistribution) GetStats() map[string]interface{} {
+	if sd.count == 0 {
+		return map[string]interface{}{
+			"count": 0,
+		}
+	}
+
+	return map[string]interface{}{
+		"count":       sd.count,
+		"sum_ms":      sd.sum,
+		"mean_ms":     sd.sum / float64(sd.count),
+		"min_ms":      float64(sd.histogram.Min()) / 1000.0,
+		"max_ms":      float64(sd.histogram.Max()) / 1000.0,
+		"p50_ms":      float64(sd.histogram.ValueAtQuantile(50)) / 1000.0,
+		"p95_ms":      float64(sd.histogram.ValueAtQuantile(95)) / 1000.0,
+		"p99_ms":      float64(sd.histogram.ValueAtQuantile(99)) / 1000.0,
+		"p99_9_ms":    float64(sd.histogram.ValueAtQuantile(99.9)) / 1000.0,
+		"std_dev_ms":  float64(sd.histogram.StdDev()) / 1000.0,
+		"last_update": sd.lastUpdate,
+	}
+}
+
+// NewPointBasedDetector creates a new point-based change detector
+func NewPointBasedDetector(percentile float64, minSamples int64) *PointBasedDetector {
+	return &PointBasedDetector{
+		distributions: make(map[string]*SegmentDistribution),
+		percentile:    percentile,
+		minSamples:    minSamples,
+	}
+}
+
+// DetectChange checks if a latency value represents a change
+func (d *PointBasedDetector) DetectChange(segmentID string, latency float64) (bool, ChangeInfo) {
+	d.mu.RLock()
+	dist, exists := d.distributions[segmentID]
+	percentile := d.percentile
+	d.mu.RUnlock()
+
+	if !exists || dist.count < d.minSamples {
+		return false, ChangeInfo{IsChange: false}
+	}
+
+	// Get historical percentile
+	historicalPercentile := dist.Percentile(percentile)
+
+	// Check if current latency exceeds historical percentile
+	isChange := latency > historicalPercentile
+
+	return isChange, ChangeInfo{
+		IsChange:   isChange,
+		Confidence: 0.8,
+		ChangeType: "percentile",
+		Details: map[string]interface{}{
+			"current_latency":       latency,
+			"historical_percentile": historicalPercentile,
+			"percentile":            percentile,
+		},
+	}
+}
+
+// UpdateDistribution adds a latency value to the distribution
+func (d *PointBasedDetector) UpdateDistribution(segmentID string, latency float64) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if dist, exists := d.distributions[segmentID]; exists {
+		dist.Add(latency)
+	} else {
+		dist = NewSegmentDistribution()
+		dist.Add(latency)
+		d.distributions[segmentID] = dist
+	}
+}
+
+// DumpStats returns statistics for all segment distributions
+func (d *PointBasedDetector) DumpStats() map[string]interface{} {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	allStats := make(map[string]interface{})
+	for segmentID, dist := range d.distributions {
+		allStats[segmentID] = dist.GetStats()
+	}
+
+	return map[string]interface{}{
+		"total_segments": len(d.distributions),
+		"percentile":     d.percentile,
+		"min_samples":    d.minSamples,
+		"segments":       allStats,
+	}
+}
+
+// isSegmentBad checks if a segment latency is "bad" based on change detection
+func (sp *segmentationProcessor) isSegmentBad(segment Segment, latency float64) bool {
+	segmentID := segment.String()
+
+	// Check for change
+	isChange, info := sp.changeDetector.DetectChange(segmentID, latency)
+
+	if isChange {
+		sp.logger.Warn("Segment latency change detected",
+			zap.String("segment_id", segmentID),
+			zap.Float64("latency", latency),
+			zap.Any("change_info", info))
+	}
+
+	// Update distribution
+	sp.changeDetector.UpdateDistribution(segmentID, latency)
+
+	return isChange
+}
+
+func (seg Segment) String() string {
+	return fmt.Sprintf(
+		"%s:%s:%s",
+		seg.ServiceOperation,
+		seg.StartEndpoint,
+		seg.EndEndpoint,
+	)
+}
+
+// LatencyMs calculates the latency of this segment in milliseconds
+func (seg Segment) LatencyMs() float64 {
+	return float64(seg.EndTime.Sub(seg.StartTime).Nanoseconds()) / 1e6
+}
+
+// createSegmentSpan creates a ptrace.Span from a segment
+func (sp *segmentationProcessor) createSegmentSpan(segment Segment, serverSpan ServerSpan, isBad bool, latency float64) ptrace.Span {
+	// Create new span
+	segmentSpan := ptrace.NewSpan()
+
+	// Set basic span properties - inherit trace ID and span ID from server span
+	segmentSpan.SetTraceID(serverSpan.Span.Span.TraceID())
+	segmentSpan.SetSpanID(serverSpan.Span.Span.SpanID()) // Inherit server span ID
+	segmentSpan.SetParentSpanID(serverSpan.Span.Span.SpanID())
+	segmentSpan.SetName(segment.String())
+
+	// Use actual segment start and end times
+	segmentSpan.SetStartTimestamp(pcommon.NewTimestampFromTime(segment.StartTime))
+	segmentSpan.SetEndTimestamp(pcommon.NewTimestampFromTime(segment.EndTime))
+
+	// Generate random 4-byte identifier for this segment
+	randomBytes := make([]byte, 4)
+	_, err := rand.Read(randomBytes)
+	if err != nil {
+		sp.logger.Warn("Failed to generate random bytes for segment", zap.Error(err))
+		// Fallback to zero bytes if random generation fails
+		randomBytes = []byte{0, 0, 0, 0}
+	}
+	segmentID := hex.EncodeToString(randomBytes)
+
+	// Add segment attributes
+	segmentSpan.Attributes().PutStr("service_operation", segment.ServiceOperation)
+	segmentSpan.Attributes().PutStr("start_endpoint", segment.StartEndpoint)
+	segmentSpan.Attributes().PutStr("end_endpoint", segment.EndEndpoint)
+	segmentSpan.Attributes().PutBool("is_bad", isBad)
+	segmentSpan.Attributes().PutDouble("latency_ms", latency)
+	segmentSpan.Attributes().PutStr("segment_id", segmentID)
+
+	return segmentSpan
+}
+
+// outputSegmentSpans outputs segment spans to the next consumer
+func (sp *segmentationProcessor) outputSegmentSpans(segmentSpans []ptrace.Span, serverSpan ServerSpan) {
+	if sp.nextConsumer == nil {
+		return
+	}
+
+	// Create output traces with segment spans
+	outputTraces := ptrace.NewTraces()
+	resourceSpans := outputTraces.ResourceSpans().AppendEmpty()
+	scopeSpans := resourceSpans.ScopeSpans().AppendEmpty()
+
+	// Copy resource attributes from original server span
+	serverSpan.Span.Resource.Resource().Attributes().CopyTo(resourceSpans.Resource().Attributes())
+
+	// Copy scope information from original server span
+	serverSpan.Span.Scope.Scope().CopyTo(scopeSpans.Scope())
+
+	// Add segment spans
+	for _, segmentSpan := range segmentSpans {
+		outputSpan := scopeSpans.Spans().AppendEmpty()
+		segmentSpan.CopyTo(outputSpan)
+	}
+
+	// Send to next consumer
+	ctx := context.Background()
+	if err := sp.nextConsumer.ConsumeTraces(ctx, outputTraces); err != nil {
+		sp.logger.Error("Failed to output segment spans",
+			zap.Error(err),
+			zap.Int("segment_count", len(segmentSpans)))
+	} else {
+		sp.logger.Debug("Successfully output segment spans",
+			zap.Int("segment_count", len(segmentSpans)))
+	}
 }

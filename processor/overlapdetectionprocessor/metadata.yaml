@@ -1,4 +1,4 @@
-type: segmentation
+type: overlapdetection
 
 status:
   class: processor
@@ -7,9 +7,8 @@ status:
   distributions: [contrib]
   codeowners:
     active: [tomislavzm]
+
 tests:
   config:
-    segment_duration: 1m
+    overlap_threshold_ms: 1.0
     enable_metrics: true
-    change_detection_percentile: 0.99
-    min_samples: 100

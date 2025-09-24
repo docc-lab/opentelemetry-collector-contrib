@@ -17,7 +17,7 @@ receivers:
 processors:
   # Span Reconstruction Processor for handling fragmented spans
   spanreconstruction:
-    max_active_spans: 1000
+    max_active_spans: 1000000
     span_ttl: 1h
     enable_metrics: false
   
