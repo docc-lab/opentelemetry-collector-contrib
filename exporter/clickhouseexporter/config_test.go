@@ -10,12 +10,13 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
-	"github.com/cenkalti/backoff/v4"
+	"github.com/cenkalti/backoff/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/config/configopaque"
 	"go.opentelemetry.io/collector/config/configretry"
+	"go.opentelemetry.io/collector/config/configtls"
 	"go.opentelemetry.io/collector/confmap/confmaptest"
 	"go.opentelemetry.io/collector/confmap/xconfmap"
 	"go.opentelemetry.io/collector/exporter/exporterhelper"
@@ -84,6 +85,12 @@ func TestLoadConfig(t *testing.T) {
 					Sizer:        exporterhelper.RequestSizerTypeRequests,
 				},
 				AsyncInsert: true,
+				TLS: configtls.ClientConfig{
+					Config: configtls.Config{
+						CertFile: "client.crt",
+						KeyFile:  "client.key",
+					},
+				},
 			},
 		},
 	}

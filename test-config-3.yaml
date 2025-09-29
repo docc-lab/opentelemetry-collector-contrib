@@ -26,10 +26,22 @@ processors:
     # Configuration options for span lookup functionality
     max_lookups: 50
     enable_metrics: true
+    export_interval_seconds: 5
   
   # Segmentation Processor for segmenting spans into time-based segments
   segmentation:
     # Configuration options for segmentation functionality
+    # Add configuration fields here as needed
+  
+  # Overlap Detection Processor for detecting overlapping segments
+  overlapdetection:
+    # Configuration options for overlap detection functionality
+    overlap_threshold_ms: 1.0
+    enable_metrics: false
+  
+  # Lookup Routing Processor for routing looked-up spans and sending metadata to agent contact
+  lookuprouting:
+    # Configuration options for lookup routing functionality
     # Add configuration fields here as needed
 
 exporters:
@@ -59,13 +71,13 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [spanreconstruction, segmentation]
+      processors: [spanreconstruction, segmentation, overlapdetection]
       exporters: [debug, agentcontact]
     
     # Pipeline 2: Span Lookup and Response
     traces/lookup:
       receivers: [agentcontact]
-      processors: [spanlookup]
+      processors: [spanlookup, lookuprouting]
       exporters: [otlp, debug]
     
     # Pipeline 3: IP Discovery Service

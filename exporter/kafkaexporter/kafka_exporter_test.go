@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"testing"
-	"time"
 
 	"github.com/IBM/sarama"
 	"github.com/IBM/sarama/mocks"
@@ -25,6 +24,7 @@ import (
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/plog"
 	"go.opentelemetry.io/collector/pdata/pmetric"
+	"go.opentelemetry.io/collector/pdata/pprofile"
 	"go.opentelemetry.io/collector/pdata/ptrace"
 	"go.opentelemetry.io/collector/pdata/testdata"
 
@@ -49,7 +49,7 @@ func TestTracesPusher(t *testing.T) {
 		},
 	)
 
-	err := exp.exportData(context.Background(), testdata.GenerateTraces(2))
+	err := exp.exportData(t.Context(), testdata.GenerateTraces(2))
 	require.NoError(t, err)
 }
 
@@ -59,7 +59,7 @@ func TestTracesPusher_attr(t *testing.T) {
 	exp, producer := newMockTracesExporter(t, *config, componenttest.NewNopHost())
 	producer.ExpectSendMessageAndSucceed()
 
-	err := exp.exportData(context.Background(), testdata.GenerateTraces(2))
+	err := exp.exportData(t.Context(), testdata.GenerateTraces(2))
 	require.NoError(t, err)
 }
 
@@ -69,7 +69,7 @@ func TestTracesPusher_ctx(t *testing.T) {
 		exp, producer := newMockTracesExporter(t, *config, componenttest.NewNopHost())
 		producer.ExpectSendMessageAndSucceed()
 
-		err := exp.exportData(topic.WithTopic(context.Background(), "my_topic"), testdata.GenerateTraces(2))
+		err := exp.exportData(topic.WithTopic(t.Context(), "my_topic"), testdata.GenerateTraces(2))
 		require.NoError(t, err)
 	})
 	t.Run("WithMetadata", func(t *testing.T) {
@@ -85,9 +85,9 @@ func TestTracesPusher_ctx(t *testing.T) {
 			return nil
 		})
 		t.Cleanup(func() {
-			require.NoError(t, exp.Close(context.Background()))
+			require.NoError(t, exp.Close(t.Context()))
 		})
-		ctx := client.NewContext(context.Background(), client.Info{
+		ctx := client.NewContext(t.Context(), client.Info{
 			Metadata: client.NewMetadata(map[string][]string{
 				"x-tenant-id":    {"my_tenant_id"},
 				"x-request-ids":  {"987654321", "0187262"},
@@ -105,9 +105,9 @@ func TestTracesPusher_ctx(t *testing.T) {
 			return nil
 		})
 		t.Cleanup(func() {
-			require.NoError(t, exp.Close(context.Background()))
+			require.NoError(t, exp.Close(t.Context()))
 		})
-		ctx := client.NewContext(context.Background(), client.Info{
+		ctx := client.NewContext(t.Context(), client.Info{
 			Metadata: client.NewMetadata(map[string][]string{
 				"x-tenant-id":    {"my_tenant_id"},
 				"x-request-ids":  {"123456789", "0187262"},
@@ -135,7 +135,7 @@ func TestTracesPusher_attr_Kgo(t *testing.T) {
 	traces := testdata.GenerateTraces(1)
 	traces.ResourceSpans().At(0).Resource().Attributes().PutStr(attributeKey, expectedTopicFromAttribute)
 
-	err := exp.exportData(context.Background(), traces)
+	err := exp.exportData(t.Context(), traces)
 	require.NoError(t, err)
 
 	records := fetchKgoRecords(t,
@@ -162,7 +162,7 @@ func TestTracesPusher_ctx_Kgo(t *testing.T) {
 			componenttest.NewNopHost(), expectedTopicFromCtx,
 		)
 
-		ctx := topic.WithTopic(context.Background(), expectedTopicFromCtx)
+		ctx := topic.WithTopic(t.Context(), expectedTopicFromCtx)
 		traces := testdata.GenerateTraces(2)
 
 		err := exp.exportData(ctx, traces)
@@ -185,7 +185,7 @@ func TestTracesPusher_ctx_Kgo(t *testing.T) {
 		)
 
 		defaultTopic := config.Traces.Topic // Fallback topic if not overridden
-		ctx := client.NewContext(context.Background(), client.Info{
+		ctx := client.NewContext(t.Context(), client.Info{
 			Metadata: client.NewMetadata(map[string][]string{
 				"x-tenant-id":   {"my_tenant_id"},
 				"x-request-ids": {"987654321", "0187262"},
@@ -220,7 +220,7 @@ func TestTracesPusher_err(t *testing.T) {
 	expErr := errors.New("failed to send")
 	producer.ExpectSendMessageAndFail(expErr)
 
-	err := exp.exportData(context.Background(), testdata.GenerateTraces(2))
+	err := exp.exportData(t.Context(), testdata.GenerateTraces(2))
 	assert.EqualError(t, err, expErr.Error())
 }
 
@@ -239,7 +239,7 @@ func TestTracesPusher_conf_err(t *testing.T) {
 		config.Traces.Encoding = "trace_encoding"
 		exp, _ := newMockTracesExporter(t, *config, host)
 
-		err := exp.exportData(context.Background(), testdata.GenerateTraces(2))
+		err := exp.exportData(t.Context(), testdata.GenerateTraces(2))
 
 		assert.True(t, consumererror.IsPermanent(err))
 	})
@@ -256,7 +256,7 @@ func TestTracesPusher_marshal_error(t *testing.T) {
 	config.Traces.Encoding = "trace_encoding"
 	exp, _ := newMockTracesExporter(t, *config, host)
 
-	err := exp.exportData(context.Background(), testdata.GenerateTraces(2))
+	err := exp.exportData(t.Context(), testdata.GenerateTraces(2))
 	assert.ErrorContains(t, err, marshalErr.Error())
 }
 
@@ -287,7 +287,7 @@ func TestTracesPusher_partitioning(t *testing.T) {
 			},
 		)
 
-		err := exp.exportData(context.Background(), input)
+		err := exp.exportData(t.Context(), input)
 		require.NoError(t, err)
 	})
 	t.Run("jaeger_partitioning", func(t *testing.T) {
@@ -309,7 +309,7 @@ func TestTracesPusher_partitioning(t *testing.T) {
 			)
 		}
 
-		err := exp.exportData(context.Background(), input)
+		err := exp.exportData(t.Context(), input)
 		require.NoError(t, err)
 		require.Len(t, keys, 4)
 		require.ElementsMatch(t, [][]byte{
@@ -346,7 +346,7 @@ func TestTracesPusher_partitioning(t *testing.T) {
 			)
 		}
 
-		err := exp.exportData(context.Background(), input)
+		err := exp.exportData(t.Context(), input)
 		require.NoError(t, err)
 
 		expected := ptrace.NewTraces()
@@ -390,7 +390,7 @@ func TestMetricsDataPusher(t *testing.T) {
 		},
 	)
 
-	err := exp.exportData(context.Background(), testdata.GenerateMetrics(2))
+	err := exp.exportData(t.Context(), testdata.GenerateMetrics(2))
 	require.NoError(t, err)
 }
 
@@ -400,7 +400,7 @@ func TestMetricsDataPusher_attr(t *testing.T) {
 	exp, producer := newMockMetricsExporter(t, *config, componenttest.NewNopHost())
 	producer.ExpectSendMessageAndSucceed()
 
-	err := exp.exportData(context.Background(), testdata.GenerateMetrics(2))
+	err := exp.exportData(t.Context(), testdata.GenerateMetrics(2))
 	require.NoError(t, err)
 }
 
@@ -410,7 +410,7 @@ func TestMetricsDataPusher_ctx(t *testing.T) {
 		exp, producer := newMockMetricsExporter(t, *config, componenttest.NewNopHost())
 		producer.ExpectSendMessageAndSucceed()
 
-		err := exp.exportData(topic.WithTopic(context.Background(), "my_topic"), testdata.GenerateMetrics(2))
+		err := exp.exportData(topic.WithTopic(t.Context(), "my_topic"), testdata.GenerateMetrics(2))
 		require.NoError(t, err)
 	})
 	t.Run("WithMetadata", func(t *testing.T) {
@@ -426,9 +426,9 @@ func TestMetricsDataPusher_ctx(t *testing.T) {
 			return nil
 		})
 		t.Cleanup(func() {
-			require.NoError(t, exp.Close(context.Background()))
+			require.NoError(t, exp.Close(t.Context()))
 		})
-		ctx := client.NewContext(context.Background(), client.Info{
+		ctx := client.NewContext(t.Context(), client.Info{
 			Metadata: client.NewMetadata(map[string][]string{
 				"x-tenant-id":    {"my_tenant_id"},
 				"x-request-ids":  {"123456789", "123141"},
@@ -446,9 +446,9 @@ func TestMetricsDataPusher_ctx(t *testing.T) {
 			return nil
 		})
 		t.Cleanup(func() {
-			require.NoError(t, exp.Close(context.Background()))
+			require.NoError(t, exp.Close(t.Context()))
 		})
-		ctx := client.NewContext(context.Background(), client.Info{
+		ctx := client.NewContext(t.Context(), client.Info{
 			Metadata: client.NewMetadata(map[string][]string{
 				"x-tenant-id":    {"my_tenant_id"},
 				"x-request-ids":  {"123456789", "123141"},
@@ -467,7 +467,7 @@ func TestMetricsPusher_err(t *testing.T) {
 	expErr := errors.New("failed to send")
 	producer.ExpectSendMessageAndFail(expErr)
 
-	err := exp.exportData(context.Background(), testdata.GenerateMetrics(2))
+	err := exp.exportData(t.Context(), testdata.GenerateMetrics(2))
 	assert.EqualError(t, err, expErr.Error())
 }
 
@@ -486,7 +486,7 @@ func TestMetricsPusher_conf_err(t *testing.T) {
 		config.Traces.Encoding = "metric_encoding"
 		exp, _ := newMockTracesExporter(t, *config, host)
 
-		err := exp.exportData(context.Background(), testdata.GenerateTraces(2))
+		err := exp.exportData(t.Context(), testdata.GenerateTraces(2))
 
 		assert.True(t, consumererror.IsPermanent(err))
 	})
@@ -503,7 +503,7 @@ func TestMetricsPusher_marshal_error(t *testing.T) {
 	config.Metrics.Encoding = "metric_encoding"
 	exp, _ := newMockMetricsExporter(t, *config, host)
 
-	err := exp.exportData(context.Background(), testdata.GenerateMetrics(2))
+	err := exp.exportData(t.Context(), testdata.GenerateMetrics(2))
 	assert.ErrorContains(t, err, marshalErr.Error())
 }
 
@@ -527,7 +527,7 @@ func TestMetricsPusher_partitioning(t *testing.T) {
 			},
 		)
 
-		err := exp.exportData(context.Background(), input)
+		err := exp.exportData(t.Context(), input)
 		require.NoError(t, err)
 	})
 	t.Run("resource_partitioning", func(t *testing.T) {
@@ -561,7 +561,7 @@ func TestMetricsPusher_partitioning(t *testing.T) {
 			)
 		}
 
-		err := exp.exportData(context.Background(), input)
+		err := exp.exportData(t.Context(), input)
 		require.NoError(t, err)
 
 		require.Len(t, keys, 3)
@@ -581,7 +581,7 @@ func TestMetricsDataPusher_Kgo(t *testing.T) {
 	)
 
 	metrics := testdata.GenerateMetrics(2)
-	err := exp.exportData(context.Background(), metrics)
+	err := exp.exportData(t.Context(), metrics)
 	require.NoError(t, err)
 
 	expectedTopic := config.Metrics.Topic
@@ -620,7 +620,7 @@ func TestMetricsDataPusher_attr_Kgo(t *testing.T) {
 	// Add the attribute to the first resource's attributes
 	metrics.ResourceMetrics().At(0).Resource().Attributes().PutStr(attributeKey, expectedTopicFromAttribute)
 
-	err := exp.exportData(context.Background(), metrics)
+	err := exp.exportData(t.Context(), metrics)
 	require.NoError(t, err)
 
 	consumerSeedBrokers := fakeCluster.ListenAddrs()
@@ -645,7 +645,7 @@ func TestMetricsDataPusher_ctx_Kgo(t *testing.T) {
 			componenttest.NewNopHost(), expectedTopicFromCtx,
 		)
 
-		ctx := topic.WithTopic(context.Background(), expectedTopicFromCtx)
+		ctx := topic.WithTopic(t.Context(), expectedTopicFromCtx)
 		metrics := testdata.GenerateMetrics(2)
 
 		err := exp.exportData(ctx, metrics)
@@ -668,7 +668,7 @@ func TestMetricsDataPusher_ctx_Kgo(t *testing.T) {
 			componenttest.NewNopHost(), config.Metrics.Topic,
 		)
 
-		ctx := client.NewContext(context.Background(), client.Info{
+		ctx := client.NewContext(t.Context(), client.Info{
 			Metadata: client.NewMetadata(map[string][]string{
 				"x-metrics-tenant-id": {"metrics_tenant"},
 				"x-metrics-req-id":    {"req123", "req456"},
@@ -710,7 +710,7 @@ func TestLogsDataPusher(t *testing.T) {
 		},
 	)
 
-	err := exp.exportData(context.Background(), testdata.GenerateLogs(2))
+	err := exp.exportData(t.Context(), testdata.GenerateLogs(2))
 	require.NoError(t, err)
 }
 
@@ -720,7 +720,7 @@ func TestLogsDataPusher_attr(t *testing.T) {
 	exp, producer := newMockLogsExporter(t, *config, componenttest.NewNopHost())
 	producer.ExpectSendMessageAndSucceed()
 
-	err := exp.exportData(context.Background(), testdata.GenerateLogs(2))
+	err := exp.exportData(t.Context(), testdata.GenerateLogs(2))
 	require.NoError(t, err)
 }
 
@@ -730,7 +730,7 @@ func TestLogsDataPusher_ctx(t *testing.T) {
 		exp, producer := newMockLogsExporter(t, *config, componenttest.NewNopHost())
 		producer.ExpectSendMessageAndSucceed()
 
-		err := exp.exportData(topic.WithTopic(context.Background(), "my_topic"), testdata.GenerateLogs(2))
+		err := exp.exportData(topic.WithTopic(t.Context(), "my_topic"), testdata.GenerateLogs(2))
 		require.NoError(t, err)
 	})
 	t.Run("WithMetadata", func(t *testing.T) {
@@ -746,9 +746,9 @@ func TestLogsDataPusher_ctx(t *testing.T) {
 			return nil
 		})
 		t.Cleanup(func() {
-			require.NoError(t, exp.Close(context.Background()))
+			require.NoError(t, exp.Close(t.Context()))
 		})
-		ctx := client.NewContext(context.Background(), client.Info{
+		ctx := client.NewContext(t.Context(), client.Info{
 			Metadata: client.NewMetadata(map[string][]string{
 				"x-tenant-id":    {"my_tenant_id"},
 				"x-request-ids":  {"123456789", "123141"},
@@ -766,9 +766,9 @@ func TestLogsDataPusher_ctx(t *testing.T) {
 			return nil
 		})
 		t.Cleanup(func() {
-			require.NoError(t, exp.Close(context.Background()))
+			require.NoError(t, exp.Close(t.Context()))
 		})
-		ctx := client.NewContext(context.Background(), client.Info{
+		ctx := client.NewContext(t.Context(), client.Info{
 			Metadata: client.NewMetadata(map[string][]string{
 				"x-tenant-id":    {"my_tenant_id"},
 				"x-request-ids":  {"123456789", "123141"},
@@ -795,7 +795,7 @@ func TestLogsDataPusher_attr_Kgo(t *testing.T) {
 	logs := testdata.GenerateLogs(1)
 	logs.ResourceLogs().At(0).Resource().Attributes().PutStr(attributeKey, expectedTopicFromAttribute)
 
-	err := exp.exportData(context.Background(), logs)
+	err := exp.exportData(t.Context(), logs)
 	require.NoError(t, err)
 
 	records := fetchKgoRecords(t,
@@ -822,7 +822,7 @@ func TestLogsDataPusher_ctx_Kgo(t *testing.T) {
 			componenttest.NewNopHost(), expectedTopicFromCtx,
 		)
 
-		ctx := topic.WithTopic(context.Background(), expectedTopicFromCtx)
+		ctx := topic.WithTopic(t.Context(), expectedTopicFromCtx)
 		logs := testdata.GenerateLogs(2)
 
 		err := exp.exportData(ctx, logs)
@@ -845,7 +845,7 @@ func TestLogsDataPusher_ctx_Kgo(t *testing.T) {
 		)
 
 		defaultTopic := config.Logs.Topic // Fallback topic if not overridden
-		ctx := client.NewContext(context.Background(), client.Info{
+		ctx := client.NewContext(t.Context(), client.Info{
 			Metadata: client.NewMetadata(map[string][]string{
 				"x-tenant-id":   {"my_tenant_id"},
 				"x-request-ids": {"987654321", "0187262"},
@@ -880,7 +880,7 @@ func TestLogsPusher_err(t *testing.T) {
 	expErr := errors.New("failed to send")
 	producer.ExpectSendMessageAndFail(expErr)
 
-	err := exp.exportData(context.Background(), testdata.GenerateLogs(2))
+	err := exp.exportData(t.Context(), testdata.GenerateLogs(2))
 	assert.EqualError(t, err, expErr.Error())
 }
 
@@ -899,7 +899,7 @@ func TestLogsPusher_conf_err(t *testing.T) {
 		config.Traces.Encoding = "log_encoding"
 		exp, _ := newMockTracesExporter(t, *config, host)
 
-		err := exp.exportData(context.Background(), testdata.GenerateTraces(2))
+		err := exp.exportData(t.Context(), testdata.GenerateTraces(2))
 
 		assert.True(t, consumererror.IsPermanent(err))
 	})
@@ -916,7 +916,7 @@ func TestLogsPusher_marshal_error(t *testing.T) {
 	config.Logs.Encoding = "log_encoding"
 	exp, _ := newMockLogsExporter(t, *config, host)
 
-	err := exp.exportData(context.Background(), testdata.GenerateLogs(2))
+	err := exp.exportData(t.Context(), testdata.GenerateLogs(2))
 	assert.ErrorContains(t, err, marshalErr.Error())
 }
 
@@ -940,7 +940,7 @@ func TestLogsPusher_partitioning(t *testing.T) {
 			},
 		)
 
-		err := exp.exportData(context.Background(), input)
+		err := exp.exportData(t.Context(), input)
 		require.NoError(t, err)
 	})
 	t.Run("resource_partitioning", func(t *testing.T) {
@@ -974,13 +974,261 @@ func TestLogsPusher_partitioning(t *testing.T) {
 			)
 		}
 
-		err := exp.exportData(context.Background(), input)
+		err := exp.exportData(t.Context(), input)
 		require.NoError(t, err)
 
 		require.Len(t, keys, 3)
 		assert.NotEmpty(t, keys[0])
 		assert.Equal(t, keys[0], keys[1])
 		assert.NotEqual(t, keys[0], keys[2])
+	})
+}
+
+func TestProfilesPusher(t *testing.T) {
+	config := createDefaultConfig().(*Config)
+	exp, producer := newMockProfilesExporter(t, *config, componenttest.NewNopHost())
+	producer.ExpectSendMessageWithMessageCheckerFunctionAndSucceed(
+		func(msg *sarama.ProducerMessage) error {
+			if msg.Topic != "otlp_profiles" {
+				return fmt.Errorf(`expected topic "otlp_profiles", got %q`, msg.Topic)
+			}
+			return nil
+		},
+	)
+
+	err := exp.exportData(t.Context(), testdata.GenerateProfiles(2))
+	require.NoError(t, err)
+}
+
+func TestProfilesPusher_attr(t *testing.T) {
+	config := createDefaultConfig().(*Config)
+	config.TopicFromAttribute = "kafka_topic"
+	exp, producer := newMockProfilesExporter(t, *config, componenttest.NewNopHost())
+	producer.ExpectSendMessageAndSucceed()
+
+	err := exp.exportData(t.Context(), testdata.GenerateProfiles(2))
+	require.NoError(t, err)
+}
+
+func TestProfilesPusher_ctx(t *testing.T) {
+	t.Run("WithTopic", func(t *testing.T) {
+		config := createDefaultConfig().(*Config)
+		exp, producer := newMockProfilesExporter(t, *config, componenttest.NewNopHost())
+		producer.ExpectSendMessageAndSucceed()
+
+		err := exp.exportData(topic.WithTopic(t.Context(), "my_topic"), testdata.GenerateProfiles(2))
+		require.NoError(t, err)
+	})
+	t.Run("WithMetadata", func(t *testing.T) {
+		config := createDefaultConfig().(*Config)
+		config.IncludeMetadataKeys = []string{"x-tenant-id", "x-request-ids"}
+		exp, producer := newMockProfilesExporter(t, *config, componenttest.NewNopHost())
+		producer.ExpectSendMessageWithMessageCheckerFunctionAndSucceed(func(pm *sarama.ProducerMessage) error {
+			assert.Equal(t, []sarama.RecordHeader{
+				{Key: []byte("x-tenant-id"), Value: []byte("my_tenant_id")},
+				{Key: []byte("x-request-ids"), Value: []byte("987654321")},
+				{Key: []byte("x-request-ids"), Value: []byte("0187262")},
+			}, pm.Headers)
+			return nil
+		})
+		t.Cleanup(func() {
+			require.NoError(t, exp.Close(t.Context()))
+		})
+		ctx := client.NewContext(t.Context(), client.Info{
+			Metadata: client.NewMetadata(map[string][]string{
+				"x-tenant-id":    {"my_tenant_id"},
+				"x-request-ids":  {"987654321", "0187262"},
+				"discarded-meta": {"my-meta"}, // This will be ignored.
+			}),
+		})
+		err := exp.exportData(ctx, testdata.GenerateProfiles(10))
+		require.NoError(t, err)
+	})
+	t.Run("WithMetadataDisabled", func(t *testing.T) {
+		config := createDefaultConfig().(*Config)
+		exp, producer := newMockProfilesExporter(t, *config, componenttest.NewNopHost())
+		producer.ExpectSendMessageWithMessageCheckerFunctionAndSucceed(func(pm *sarama.ProducerMessage) error {
+			assert.Nil(t, pm.Headers)
+			return nil
+		})
+		t.Cleanup(func() {
+			require.NoError(t, exp.Close(t.Context()))
+		})
+		ctx := client.NewContext(t.Context(), client.Info{
+			Metadata: client.NewMetadata(map[string][]string{
+				"x-tenant-id":    {"my_tenant_id"},
+				"x-request-ids":  {"123456789", "0187262"},
+				"discarded-meta": {"my-meta"},
+			}),
+		})
+		err := exp.exportData(ctx, testdata.GenerateProfiles(5))
+		require.NoError(t, err)
+	})
+}
+
+func TestProfilesPusher_attr_Kgo(t *testing.T) {
+	require.NoError(t, featuregate.GlobalRegistry().Set(franzGoClientFeatureGateName, true))
+	defer require.NoError(t, featuregate.GlobalRegistry().Set(franzGoClientFeatureGateName, false))
+
+	config := createDefaultConfig().(*Config)
+	attributeKey := "my_custom_topic_key_profile"
+	expectedTopicFromAttribute := "topic_from_profiles_attr_kgo"
+	config.TopicFromAttribute = attributeKey
+
+	exp, fakeCluster := newKgoMockProfilesExporter(t, *config,
+		componenttest.NewNopHost(), expectedTopicFromAttribute,
+	)
+
+	profiles := testdata.GenerateProfiles(1)
+	profiles.ResourceProfiles().At(0).Resource().Attributes().PutStr(attributeKey, expectedTopicFromAttribute)
+
+	err := exp.exportData(t.Context(), profiles)
+	require.NoError(t, err)
+
+	records := fetchKgoRecords(t,
+		fakeCluster.ListenAddrs(), expectedTopicFromAttribute,
+	)
+	fakeCluster.Close()
+
+	require.Len(t, records, 1, "expected one message to be produced, got %d", len(records))
+	record := records[0]
+	assert.Equal(t, expectedTopicFromAttribute, record.Topic, "message topic mismatch")
+
+	assert.NotEmpty(t, record.Value)
+	assert.Empty(t, record.Headers, "expected no headers for this test case")
+	assert.Nil(t, record.Key, "expected nil key for this test case")
+}
+
+func TestProfilesPusher_ctx_Kgo(t *testing.T) {
+	require.NoError(t, featuregate.GlobalRegistry().Set(franzGoClientFeatureGateName, true))
+	defer require.NoError(t, featuregate.GlobalRegistry().Set(franzGoClientFeatureGateName, false))
+	t.Run("WithTopic", func(t *testing.T) {
+		config := createDefaultConfig().(*Config)
+		expectedTopicFromCtx := "my_kgo_topic_from_ctx"
+		exp, fakeCluster := newKgoMockProfilesExporter(t, *config,
+			componenttest.NewNopHost(), expectedTopicFromCtx,
+		)
+
+		ctx := topic.WithTopic(t.Context(), expectedTopicFromCtx)
+		profiles := testdata.GenerateProfiles(2)
+
+		err := exp.exportData(ctx, profiles)
+		require.NoError(t, err)
+
+		records := fetchKgoRecords(t,
+			fakeCluster.ListenAddrs(), expectedTopicFromCtx,
+		)
+		require.Len(t, records, 1, "expected one message to be produced")
+		record := records[0]
+		assert.Equal(t, expectedTopicFromCtx, record.Topic, "message topic mismatch")
+		assert.NotEmpty(t, record.Value)
+	})
+
+	t.Run("WithMetadata", func(t *testing.T) {
+		config := createDefaultConfig().(*Config)
+		config.IncludeMetadataKeys = []string{"x-tenant-id", "x-request-ids"}
+		exp, fakeCluster := newKgoMockProfilesExporter(t, *config,
+			componenttest.NewNopHost(), config.Profiles.Topic,
+		)
+
+		defaultTopic := config.Profiles.Topic // Fallback topic if not overridden
+		ctx := client.NewContext(t.Context(), client.Info{
+			Metadata: client.NewMetadata(map[string][]string{
+				"x-tenant-id":   {"my_tenant_id"},
+				"x-request-ids": {"987654321", "0187262"},
+				"ignored-key":   {"some-value"}, // This should be ignored
+			}),
+		})
+		profiles := testdata.GenerateProfiles(1)
+
+		err := exp.exportData(ctx, profiles)
+		require.NoError(t, err)
+
+		records := fetchKgoRecords(t,
+			fakeCluster.ListenAddrs(), defaultTopic,
+		)
+		require.Len(t, records, 1, "expected one message to be produced")
+		record := records[0]
+		assert.Equal(t, defaultTopic, record.Topic, "message topic mismatch")
+		assert.NotEmpty(t, record.Value)
+		assert.ElementsMatch(t, []kgo.RecordHeader{
+			{Key: "x-tenant-id", Value: []byte("my_tenant_id")},
+			{Key: "x-request-ids", Value: []byte("987654321")},
+			{Key: "x-request-ids", Value: []byte("0187262")},
+		}, record.Headers, "message headers mismatch")
+		assert.Nil(t, record.Key, "expected nil key for this test case")
+	})
+}
+
+func TestProfilesPusher_err(t *testing.T) {
+	config := createDefaultConfig().(*Config)
+	exp, producer := newMockProfilesExporter(t, *config, componenttest.NewNopHost())
+
+	expErr := errors.New("failed to send")
+	producer.ExpectSendMessageAndFail(expErr)
+
+	err := exp.exportData(t.Context(), testdata.GenerateProfiles(2))
+	assert.EqualError(t, err, expErr.Error())
+}
+
+func TestProfilesPusher_conf_err(t *testing.T) {
+	t.Run("should return permanent err on config error", func(t *testing.T) {
+		expErr := sarama.ConfigurationError("configuration error")
+		prodErrs := sarama.ProducerErrors{
+			&sarama.ProducerError{Err: expErr},
+		}
+		host := extensionsHost{
+			component.MustNewID("profile_encoding"): pprofileMarshalerFuncExtension(func(pprofile.Profiles) ([]byte, error) {
+				return nil, prodErrs
+			}),
+		}
+		config := createDefaultConfig().(*Config)
+		config.Profiles.Encoding = "profile_encoding"
+		exp, _ := newMockProfilesExporter(t, *config, host)
+
+		err := exp.exportData(t.Context(), testdata.GenerateProfiles(2))
+
+		assert.True(t, consumererror.IsPermanent(err))
+	})
+}
+
+func TestProfilesPusher_marshal_error(t *testing.T) {
+	marshalErr := errors.New("failed to marshal")
+	host := extensionsHost{
+		component.MustNewID("profile_encoding"): pprofileMarshalerFuncExtension(func(pprofile.Profiles) ([]byte, error) {
+			return nil, marshalErr
+		}),
+	}
+	config := createDefaultConfig().(*Config)
+	config.Profiles.Encoding = "profile_encoding"
+	exp, _ := newMockProfilesExporter(t, *config, host)
+
+	err := exp.exportData(t.Context(), testdata.GenerateProfiles(2))
+	assert.ErrorContains(t, err, marshalErr.Error())
+}
+
+func TestProfilesPusher_partitioning(t *testing.T) {
+	input := testdata.GenerateProfiles(0)
+	for _, serviceName := range []string{"service1", "service1", "service2"} {
+		resourceProfiles := testdata.GenerateProfiles(1).ResourceProfiles().At(0)
+		resourceProfiles.Resource().Attributes().PutStr("service.name", serviceName)
+		resourceProfiles.CopyTo(input.ResourceProfiles().AppendEmpty())
+	}
+
+	t.Run("default_partitioning", func(t *testing.T) {
+		config := createDefaultConfig().(*Config)
+		exp, producer := newMockProfilesExporter(t, *config, componenttest.NewNopHost())
+		producer.ExpectSendMessageWithMessageCheckerFunctionAndSucceed(
+			func(msg *sarama.ProducerMessage) error {
+				if msg.Key != nil {
+					return errors.New("message key should be nil")
+				}
+				return nil
+			},
+		)
+
+		err := exp.exportData(t.Context(), input)
+		require.NoError(t, err)
 	})
 }
 
@@ -998,7 +1246,7 @@ func Test_GetTopic(t *testing.T) {
 			name:               "Valid metric attribute, return topic name",
 			topicFromAttribute: "resource-attr",
 			signalCfg:          SignalConfig{Topic: "defaultTopic"},
-			ctx:                topic.WithTopic(context.Background(), "context-topic"),
+			ctx:                topic.WithTopic(t.Context(), "context-topic"),
 			resource:           testdata.GenerateMetrics(1).ResourceMetrics(),
 			wantTopic:          "resource-attr-val-1",
 		},
@@ -1006,7 +1254,7 @@ func Test_GetTopic(t *testing.T) {
 			name:               "Valid trace attribute, return topic name",
 			topicFromAttribute: "resource-attr",
 			signalCfg:          SignalConfig{Topic: "defaultTopic"},
-			ctx:                topic.WithTopic(context.Background(), "context-topic"),
+			ctx:                topic.WithTopic(t.Context(), "context-topic"),
 			resource:           testdata.GenerateTraces(1).ResourceSpans(),
 			wantTopic:          "resource-attr-val-1",
 		},
@@ -1014,7 +1262,7 @@ func Test_GetTopic(t *testing.T) {
 			name:               "Valid log attribute, return topic name",
 			topicFromAttribute: "resource-attr",
 			signalCfg:          SignalConfig{Topic: "defaultTopic"},
-			ctx:                topic.WithTopic(context.Background(), "context-topic"),
+			ctx:                topic.WithTopic(t.Context(), "context-topic"),
 			resource:           testdata.GenerateLogs(1).ResourceLogs(),
 			wantTopic:          "resource-attr-val-1",
 		},
@@ -1022,7 +1270,7 @@ func Test_GetTopic(t *testing.T) {
 			name:               "Attribute not found",
 			topicFromAttribute: "nonexistent_attribute",
 			signalCfg:          SignalConfig{Topic: "defaultTopic"},
-			ctx:                context.Background(),
+			ctx:                t.Context(),
 			resource:           testdata.GenerateMetrics(1).ResourceMetrics(),
 			wantTopic:          "defaultTopic",
 		},
@@ -1031,7 +1279,7 @@ func Test_GetTopic(t *testing.T) {
 			name:               "Valid metric context, return topic name",
 			topicFromAttribute: "nonexistent_attribute",
 			signalCfg:          SignalConfig{Topic: "defaultTopic"},
-			ctx:                topic.WithTopic(context.Background(), "context-topic"),
+			ctx:                topic.WithTopic(t.Context(), "context-topic"),
 			resource:           testdata.GenerateMetrics(1).ResourceMetrics(),
 			wantTopic:          "context-topic",
 		},
@@ -1039,7 +1287,7 @@ func Test_GetTopic(t *testing.T) {
 			name:               "Valid trace context, return topic name",
 			topicFromAttribute: "nonexistent_attribute",
 			signalCfg:          SignalConfig{Topic: "defaultTopic"},
-			ctx:                topic.WithTopic(context.Background(), "context-topic"),
+			ctx:                topic.WithTopic(t.Context(), "context-topic"),
 			resource:           testdata.GenerateTraces(1).ResourceSpans(),
 			wantTopic:          "context-topic",
 		},
@@ -1047,7 +1295,7 @@ func Test_GetTopic(t *testing.T) {
 			name:               "Valid log context, return topic name",
 			topicFromAttribute: "nonexistent_attribute",
 			signalCfg:          SignalConfig{Topic: "defaultTopic"},
-			ctx:                topic.WithTopic(context.Background(), "context-topic"),
+			ctx:                topic.WithTopic(t.Context(), "context-topic"),
 			resource:           testdata.GenerateLogs(1).ResourceLogs(),
 			wantTopic:          "context-topic",
 		},
@@ -1056,13 +1304,13 @@ func Test_GetTopic(t *testing.T) {
 			name:               "Attribute not found",
 			topicFromAttribute: "nonexistent_attribute",
 			signalCfg:          SignalConfig{Topic: "defaultTopic"},
-			ctx:                context.Background(),
+			ctx:                t.Context(),
 			resource:           testdata.GenerateMetrics(1).ResourceMetrics(),
 			wantTopic:          "defaultTopic",
 		},
 		{
 			name:      "TopicFromAttribute, return default topic",
-			ctx:       context.Background(),
+			ctx:       t.Context(),
 			signalCfg: SignalConfig{Topic: "defaultTopic"},
 			resource:  testdata.GenerateMetrics(1).ResourceMetrics(),
 			wantTopic: "defaultTopic",
@@ -1074,7 +1322,7 @@ func Test_GetTopic(t *testing.T) {
 				Topic:                "defaultTopic",
 				TopicFromMetadataKey: "metrics_topic_metadata",
 			},
-			ctx: client.NewContext(context.Background(),
+			ctx: client.NewContext(t.Context(),
 				client.Info{Metadata: client.NewMetadata(map[string][]string{
 					"metrics_topic_metadata": {"my_metrics_topic"},
 				})},
@@ -1088,7 +1336,7 @@ func Test_GetTopic(t *testing.T) {
 				Topic:                "defaultTopic",
 				TopicFromMetadataKey: "logs_topic_metadata",
 			},
-			ctx: client.NewContext(context.Background(),
+			ctx: client.NewContext(t.Context(),
 				client.Info{Metadata: client.NewMetadata(map[string][]string{
 					"logs_topic_metadata": {"my_logs_topic"},
 				})},
@@ -1102,7 +1350,7 @@ func Test_GetTopic(t *testing.T) {
 				Topic:                "defaultTopic",
 				TopicFromMetadataKey: "traces_topic_metadata",
 			},
-			ctx: client.NewContext(context.Background(),
+			ctx: client.NewContext(t.Context(),
 				client.Info{Metadata: client.NewMetadata(map[string][]string{
 					"traces_topic_metadata": {"my_traces_topic"},
 				})},
@@ -1116,7 +1364,7 @@ func Test_GetTopic(t *testing.T) {
 				Topic:                "defaultTopic",
 				TopicFromMetadataKey: "key not found",
 			},
-			ctx: client.NewContext(context.Background(),
+			ctx: client.NewContext(t.Context(),
 				client.Info{Metadata: client.NewMetadata(map[string][]string{
 					"traces_topic_metadata": {"my_traces_topic"},
 				})},
@@ -1154,11 +1402,11 @@ func (f ptraceMarshalerFuncExtension) MarshalTraces(td ptrace.Traces) ([]byte, e
 	return f(td)
 }
 
-func (f ptraceMarshalerFuncExtension) Start(context.Context, component.Host) error {
+func (ptraceMarshalerFuncExtension) Start(context.Context, component.Host) error {
 	return nil
 }
 
-func (f ptraceMarshalerFuncExtension) Shutdown(context.Context) error {
+func (ptraceMarshalerFuncExtension) Shutdown(context.Context) error {
 	return nil
 }
 
@@ -1168,11 +1416,11 @@ func (f pmetricMarshalerFuncExtension) MarshalMetrics(td pmetric.Metrics) ([]byt
 	return f(td)
 }
 
-func (f pmetricMarshalerFuncExtension) Start(context.Context, component.Host) error {
+func (pmetricMarshalerFuncExtension) Start(context.Context, component.Host) error {
 	return nil
 }
 
-func (f pmetricMarshalerFuncExtension) Shutdown(context.Context) error {
+func (pmetricMarshalerFuncExtension) Shutdown(context.Context) error {
 	return nil
 }
 
@@ -1182,16 +1430,31 @@ func (f plogMarshalerFuncExtension) MarshalLogs(td plog.Logs) ([]byte, error) {
 	return f(td)
 }
 
-func (f plogMarshalerFuncExtension) Start(context.Context, component.Host) error {
+func (plogMarshalerFuncExtension) Start(context.Context, component.Host) error {
 	return nil
 }
 
-func (f plogMarshalerFuncExtension) Shutdown(context.Context) error {
+func (plogMarshalerFuncExtension) Shutdown(context.Context) error {
+	return nil
+}
+
+type pprofileMarshalerFuncExtension func(pprofile.Profiles) ([]byte, error)
+
+func (f pprofileMarshalerFuncExtension) MarshalProfiles(td pprofile.Profiles) ([]byte, error) {
+	return f(td)
+}
+
+func (pprofileMarshalerFuncExtension) Start(context.Context, component.Host) error {
+	return nil
+}
+
+func (pprofileMarshalerFuncExtension) Shutdown(context.Context) error {
 	return nil
 }
 
 func newMockTracesExporter(t *testing.T, cfg Config, host component.Host) (*kafkaExporter[ptrace.Traces], *mocks.SyncProducer) {
-	exp := newTracesExporter(cfg, exportertest.NewNopSettings(metadata.Type))
+	set := exportertest.NewNopSettings(metadata.Type)
+	exp := newTracesExporter(cfg, set)
 
 	// Fake starting the exporter.
 	messenger, err := exp.newMessenger(host)
@@ -1200,16 +1463,23 @@ func newMockTracesExporter(t *testing.T, cfg Config, host component.Host) (*kafk
 
 	// Create a mock producer.
 	producer := mocks.NewSyncProducer(t, sarama.NewConfig())
-	exp.producer = kafkaclient.NewSaramaSyncProducer(producer, cfg.IncludeMetadataKeys)
+	tb, err := metadata.NewTelemetryBuilder(set.TelemetrySettings)
+	require.NoError(t, err)
+	exp.producer = kafkaclient.NewSaramaSyncProducer(
+		producer,
+		kafkaclient.NewSaramaProducerMetrics(tb),
+		cfg.IncludeMetadataKeys,
+	)
 
 	t.Cleanup(func() {
-		assert.NoError(t, exp.Close(context.Background()))
+		assert.NoError(t, exp.Close(t.Context()))
 	})
 	return exp, producer
 }
 
 func newMockMetricsExporter(t *testing.T, cfg Config, host component.Host) (*kafkaExporter[pmetric.Metrics], *mocks.SyncProducer) {
-	exp := newMetricsExporter(cfg, exportertest.NewNopSettings(metadata.Type))
+	set := exportertest.NewNopSettings(metadata.Type)
+	exp := newMetricsExporter(cfg, set)
 
 	// Fake starting the exporter.
 	messenger, err := exp.newMessenger(host)
@@ -1218,16 +1488,23 @@ func newMockMetricsExporter(t *testing.T, cfg Config, host component.Host) (*kaf
 
 	// Create a mock producer.
 	producer := mocks.NewSyncProducer(t, sarama.NewConfig())
-	exp.producer = kafkaclient.NewSaramaSyncProducer(producer, cfg.IncludeMetadataKeys)
+	tb, err := metadata.NewTelemetryBuilder(set.TelemetrySettings)
+	require.NoError(t, err)
+	exp.producer = kafkaclient.NewSaramaSyncProducer(
+		producer,
+		kafkaclient.NewSaramaProducerMetrics(tb),
+		cfg.IncludeMetadataKeys,
+	)
 
 	t.Cleanup(func() {
-		assert.NoError(t, exp.Close(context.Background()))
+		assert.NoError(t, exp.Close(t.Context()))
 	})
 	return exp, producer
 }
 
 func newMockLogsExporter(t *testing.T, cfg Config, host component.Host) (*kafkaExporter[plog.Logs], *mocks.SyncProducer) {
-	exp := newLogsExporter(cfg, exportertest.NewNopSettings(metadata.Type))
+	set := exportertest.NewNopSettings(metadata.Type)
+	exp := newLogsExporter(cfg, set)
 
 	// Fake starting the exporter.
 	messenger, err := exp.newMessenger(host)
@@ -1236,10 +1513,41 @@ func newMockLogsExporter(t *testing.T, cfg Config, host component.Host) (*kafkaE
 
 	// Create a mock producer.
 	producer := mocks.NewSyncProducer(t, sarama.NewConfig())
-	exp.producer = kafkaclient.NewSaramaSyncProducer(producer, cfg.IncludeMetadataKeys)
+	tb, err := metadata.NewTelemetryBuilder(set.TelemetrySettings)
+	require.NoError(t, err)
+	exp.producer = kafkaclient.NewSaramaSyncProducer(
+		producer,
+		kafkaclient.NewSaramaProducerMetrics(tb),
+		cfg.IncludeMetadataKeys,
+	)
 
 	t.Cleanup(func() {
-		assert.NoError(t, exp.Close(context.Background()))
+		assert.NoError(t, exp.Close(t.Context()))
+	})
+	return exp, producer
+}
+
+func newMockProfilesExporter(t *testing.T, cfg Config, host component.Host) (*kafkaExporter[pprofile.Profiles], *mocks.SyncProducer) {
+	set := exportertest.NewNopSettings(metadata.Type)
+	exp := newProfilesExporter(cfg, set)
+
+	// Fake starting the exporter.
+	messenger, err := exp.newMessenger(host)
+	require.NoError(t, err)
+	exp.messenger = messenger
+
+	// Create a mock producer.
+	producer := mocks.NewSyncProducer(t, sarama.NewConfig())
+	tb, err := metadata.NewTelemetryBuilder(set.TelemetrySettings)
+	require.NoError(t, err)
+	exp.producer = kafkaclient.NewSaramaSyncProducer(
+		producer,
+		kafkaclient.NewSaramaProducerMetrics(tb),
+		cfg.IncludeMetadataKeys,
+	)
+
+	t.Cleanup(func() {
+		assert.NoError(t, exp.Close(t.Context()))
 	})
 	return exp, producer
 }
@@ -1258,6 +1566,12 @@ func newKgoMockTracesExporter(t *testing.T, cfg Config, host component.Host, top
 
 func newKgoMockMetricsExporter(t *testing.T, cfg Config, host component.Host, topics ...string) (*kafkaExporter[pmetric.Metrics], *kfake.Cluster) {
 	exp := newMetricsExporter(cfg, exportertest.NewNopSettings(metadata.Type))
+	cluster := configureExporter(t, exp, cfg, host, topics...)
+	return exp, cluster
+}
+
+func newKgoMockProfilesExporter(t *testing.T, cfg Config, host component.Host, topics ...string) (*kafkaExporter[pprofile.Profiles], *kfake.Cluster) {
+	exp := newProfilesExporter(cfg, exportertest.NewNopSettings(metadata.Type))
 	cluster := configureExporter(t, exp, cfg, host, topics...)
 	return exp, cluster
 }
@@ -1281,11 +1595,13 @@ func configureExporter[T any](tb testing.TB,
 	exp.messenger = messenger
 	exp.producer = kafkaclient.NewFranzSyncProducer(client, cfg.IncludeMetadataKeys)
 
-	tb.Cleanup(func() { assert.NoError(tb, exp.Close(context.Background())) })
+	tb.Cleanup(func() { assert.NoError(tb, exp.Close(tb.Context())) })
 	return cluster
 }
 
-// fetchKgoRecords polls a franz-go topic for up to 5 seconds and returns all records produced to that topic.
+// fetchKgoRecords polls a franz-go topic and returns at most one record produced to that topic.
+//
+// TODO rename the function to fetchKgoRecord, and have it return exactly one record.
 func fetchKgoRecords(tb testing.TB, brokers []string, topic string) []*kgo.Record {
 	clientOpts := []kgo.Opt{
 		kgo.SeedBrokers(brokers...),
@@ -1296,12 +1612,8 @@ func fetchKgoRecords(tb testing.TB, brokers []string, topic string) []*kgo.Recor
 	require.NoError(tb, err, "failed to create kgo consumer client")
 	defer consumerClient.Close()
 
-	ctx, cancel := context.WithTimeoutCause(context.Background(), 500*time.Millisecond,
-		errors.New("No records were received"))
-	defer cancel()
-
 	var records []*kgo.Record
-	fetches := consumerClient.PollRecords(ctx, 1)
+	fetches := consumerClient.PollRecords(tb.Context(), 1)
 	require.NoError(tb, fetches.Err(), "error polling records")
 	fetches.EachRecord(func(r *kgo.Record) {
 		records = append(records, r)

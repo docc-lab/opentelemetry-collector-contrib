@@ -460,10 +460,12 @@ func (sp *segmentationProcessor) handleClientSpan(spanWithContext SpanWithContex
 	}
 
 	// Check if the parent server span exists
+	sp.spansMutex.Lock()
 	if parentServerSpan, exists := sp.serverSpans[parentSpanKey]; exists {
 		// Parent exists, add this client span to its ChildSpans
 		parentServerSpan.ChildSpans = append(parentServerSpan.ChildSpans, spanWithContext)
 		sp.serverSpans[parentSpanKey] = parentServerSpan // Update the map
+		sp.spansMutex.Unlock()
 
 		sp.logger.Debug("Added client span to existing parent",
 			zap.String("client_span_key", spanKey),
@@ -480,6 +482,7 @@ func (sp *segmentationProcessor) handleClientSpan(spanWithContext SpanWithContex
 		}
 
 		sp.spanTimestamps[spanKey] = time.Now()
+		sp.spansMutex.Unlock()
 
 		sp.logger.Debug("Added client span to waiting list",
 			zap.String("client_span_key", spanKey),
@@ -907,8 +910,8 @@ func (sp *segmentationProcessor) createSegmentSpan(segment Segment, serverSpan S
 
 	// Set basic span properties - inherit trace ID and span ID from server span
 	segmentSpan.SetTraceID(serverSpan.Span.Span.TraceID())
-	segmentSpan.SetSpanID(serverSpan.Span.Span.SpanID()) // Inherit server span ID
-	segmentSpan.SetParentSpanID(serverSpan.Span.Span.SpanID())
+	segmentSpan.SetSpanID(serverSpan.Span.Span.SpanID())             // Inherit server span ID
+	segmentSpan.SetParentSpanID(serverSpan.Span.Span.ParentSpanID()) // Inherit server span's parent
 	segmentSpan.SetName(segment.String())
 
 	// Use actual segment start and end times
@@ -932,6 +935,13 @@ func (sp *segmentationProcessor) createSegmentSpan(segment Segment, serverSpan S
 	segmentSpan.Attributes().PutBool("is_bad", isBad)
 	segmentSpan.Attributes().PutDouble("latency_ms", latency)
 	segmentSpan.Attributes().PutStr("segment_id", segmentID)
+
+	// Copy upstream.ip attribute from the original server span if it exists
+	if upstreamIP, exists := serverSpan.Span.Span.Attributes().AsRaw()["upstream.ip"]; exists {
+		if upstreamIPStr, ok := upstreamIP.(string); ok {
+			segmentSpan.Attributes().PutStr("upstream.ip", upstreamIPStr)
+		}
+	}
 
 	return segmentSpan
 }

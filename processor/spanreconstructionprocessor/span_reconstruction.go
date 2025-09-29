@@ -1436,3 +1436,26 @@ func (tcs *tracepointChainState) processSpanEnd(
 	return toReturn
 }
 */
+
+// GetClosedSpanData returns span data for a closed span by key
+func (sr *SpanReconstructionProcessor) GetClosedSpanData(spanKey string) (ptrace.Span, ptrace.ResourceSpans, ptrace.ScopeSpans, bool) {
+	sr.SpansMutex.RLock()
+	defer sr.SpansMutex.RUnlock()
+
+	if span, exists := sr.ClosedSpans[spanKey]; exists {
+		return span.span, span.resource, span.scope, true
+	}
+	return ptrace.Span{}, ptrace.ResourceSpans{}, ptrace.ScopeSpans{}, false
+}
+
+// GetAllClosedSpanKeys returns all keys from ClosedSpans
+func (sr *SpanReconstructionProcessor) GetAllClosedSpanKeys() []string {
+	sr.SpansMutex.RLock()
+	defer sr.SpansMutex.RUnlock()
+
+	keys := make([]string, 0, len(sr.ClosedSpans))
+	for key := range sr.ClosedSpans {
+		keys = append(keys, key)
+	}
+	return keys
+}

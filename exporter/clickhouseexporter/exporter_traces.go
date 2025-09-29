@@ -36,12 +36,12 @@ func newTracesExporter(logger *zap.Logger, cfg *Config) *tracesExporter {
 }
 
 func (e *tracesExporter) start(ctx context.Context, _ component.Host) error {
-	dsn, err := e.cfg.buildDSN()
+	opt, err := e.cfg.buildClickHouseOptions()
 	if err != nil {
 		return err
 	}
 
-	e.db, err = internal.NewClickhouseClient(dsn)
+	e.db, err = internal.NewClickhouseClientFromOptions(opt)
 	if err != nil {
 		return err
 	}
@@ -169,7 +169,7 @@ func convertEvents(events ptrace.SpanEventSlice) (times []time.Time, names []str
 	return
 }
 
-func convertLinks(links ptrace.SpanLinkSlice) (traceIDs []string, spanIDs []string, states []string, attrs []column.IterableOrderedMap) {
+func convertLinks(links ptrace.SpanLinkSlice) (traceIDs, spanIDs, states []string, attrs []column.IterableOrderedMap) {
 	for i := 0; i < links.Len(); i++ {
 		link := links.At(i)
 		traceIDs = append(traceIDs, traceutil.TraceIDToHexOrEmptyString(link.TraceID()))

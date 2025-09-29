@@ -8,9 +8,9 @@ import (
 	"testing"
 
 	"github.com/DataDog/datadog-agent/comp/otelcol/otlp/testutil"
-	"github.com/DataDog/opentelemetry-mapping-go/pkg/otlp/attributes"
-	"github.com/DataDog/opentelemetry-mapping-go/pkg/otlp/attributes/source"
-	"github.com/DataDog/opentelemetry-mapping-go/pkg/otlp/metrics"
+	"github.com/DataDog/datadog-agent/pkg/opentelemetry-mapping-go/otlp/attributes"
+	"github.com/DataDog/datadog-agent/pkg/opentelemetry-mapping-go/otlp/attributes/source"
+	"github.com/DataDog/datadog-agent/pkg/opentelemetry-mapping-go/otlp/metrics"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/component"
@@ -41,6 +41,13 @@ func newTranslator(t *testing.T, logger *zap.Logger) *metrics.Translator {
 	return tr
 }
 
+func addTestMetric(_ *testing.T, rm pmetric.ResourceMetrics) {
+	met := rm.ScopeMetrics().AppendEmpty().Metrics().AppendEmpty()
+	met.SetEmptyGauge()
+	met.SetName("test.metric")
+	met.Gauge().DataPoints().AppendEmpty().SetDoubleValue(1.0)
+}
+
 func TestRunningMetrics(t *testing.T) {
 	ms := pmetric.NewMetrics()
 	rms := ms.ResourceMetrics()
@@ -48,21 +55,25 @@ func TestRunningMetrics(t *testing.T) {
 	rm := rms.AppendEmpty()
 	resAttrs := rm.Resource().Attributes()
 	resAttrs.PutStr(attributes.AttributeDatadogHostname, "resource-hostname-1")
+	addTestMetric(t, rm)
 
 	rm = rms.AppendEmpty()
 	resAttrs = rm.Resource().Attributes()
 	resAttrs.PutStr(attributes.AttributeDatadogHostname, "resource-hostname-1")
+	addTestMetric(t, rm)
 
 	rm = rms.AppendEmpty()
 	resAttrs = rm.Resource().Attributes()
 	resAttrs.PutStr(attributes.AttributeDatadogHostname, "resource-hostname-2")
+	addTestMetric(t, rm)
 
-	rms.AppendEmpty()
+	rm = rms.AppendEmpty()
+	addTestMetric(t, rm)
 
 	logger, _ := zap.NewProduction()
 	tr := newTranslator(t, logger)
 
-	ctx := context.Background()
+	ctx := t.Context()
 	consumer := NewConsumer(nil)
 	metadata, err := tr.MapMetrics(ctx, ms, consumer, nil)
 	assert.NoError(t, err)
@@ -94,19 +105,22 @@ func TestTagsMetrics(t *testing.T) {
 	})
 	baseAttrs.CopyTo(rm.Resource().Attributes())
 	rm.Resource().Attributes().PutStr(string(conventions.AWSECSTaskARNKey), "task-arn-1")
+	addTestMetric(t, rm)
 
 	rm = rms.AppendEmpty()
 	baseAttrs.CopyTo(rm.Resource().Attributes())
 	rm.Resource().Attributes().PutStr(string(conventions.AWSECSTaskARNKey), "task-arn-2")
+	addTestMetric(t, rm)
 
 	rm = rms.AppendEmpty()
 	baseAttrs.CopyTo(rm.Resource().Attributes())
 	rm.Resource().Attributes().PutStr(string(conventions.AWSECSTaskARNKey), "task-arn-3")
+	addTestMetric(t, rm)
 
 	logger, _ := zap.NewProduction()
 	tr := newTranslator(t, logger)
 
-	ctx := context.Background()
+	ctx := t.Context()
 	consumer := NewConsumer(nil)
 	metadata, err := tr.MapMetrics(ctx, ms, consumer, nil)
 	assert.NoError(t, err)

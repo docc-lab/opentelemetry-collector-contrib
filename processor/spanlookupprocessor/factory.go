@@ -25,8 +25,9 @@ func NewFactory() processor.Factory {
 
 func createDefaultConfig() component.Config {
 	return &Config{
-		MaxLookups:    1000,
-		EnableMetrics: false,
+		MaxLookups:            1000,
+		EnableMetrics:         false,
+		ExportIntervalSeconds: 5,
 	}
 }
 
@@ -37,7 +38,7 @@ func createTracesProcessor(
 	nextConsumer consumer.Traces,
 ) (processor.Traces, error) {
 	oCfg := cfg.(*Config)
-	sp := newSpanLookupProcessor(set.Logger, oCfg)
+	sp := newSpanLookupProcessor(set.Logger, oCfg, nextConsumer)
 	return processorhelper.NewTraces(
 		ctx,
 		set,

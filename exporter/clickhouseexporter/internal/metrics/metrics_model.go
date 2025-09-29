@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
@@ -43,7 +42,7 @@ type MetricTypeConfig struct {
 // any type of metrics need implement it.
 type MetricsModel interface {
 	// Add used to bind MetricsMetaData to a specific metric then put them into a slice
-	Add(resAttr pcommon.Map, resURL string, scopeInstr pcommon.InstrumentationScope, scopeURL string, metrics any, name string, description string, unit string) error
+	Add(resAttr pcommon.Map, resURL string, scopeInstr pcommon.InstrumentationScope, scopeURL string, metrics any, name, description, unit string) error
 	// insert is used to insert metric data to clickhouse
 	insert(ctx context.Context, db driver.Conn) error
 }
@@ -145,7 +144,6 @@ func getValue(intValue int64, floatValue float64, dataType any) float64 {
 		case pmetric.ExemplarValueTypeInt:
 			return float64(intValue)
 		case pmetric.ExemplarValueTypeEmpty:
-			logger.Warn("Examplar value type is unset, use 0.0 as default")
 			return 0.0
 		default:
 			logger.Warn("Can't find a suitable value for ExemplarValueType, use 0.0 as default")
@@ -158,7 +156,6 @@ func getValue(intValue int64, floatValue float64, dataType any) float64 {
 		case pmetric.NumberDataPointValueTypeInt:
 			return float64(intValue)
 		case pmetric.NumberDataPointValueTypeEmpty:
-			logger.Warn("DataPoint value type is unset, use 0.0 as default")
 			return 0.0
 		default:
 			logger.Warn("Can't find a suitable value for NumberDataPointValueType, use 0.0 as default")
@@ -205,14 +202,4 @@ func convertValueAtQuantile(valueAtQuantile pmetric.SummaryDataPointValueAtQuant
 		values = append(values, value.Value())
 	}
 	return quantiles, values
-}
-
-func newPlaceholder(count int) *string {
-	var b strings.Builder
-	for i := 0; i < count; i++ {
-		b.WriteString(",?")
-	}
-	b.WriteString("),")
-	placeholder := strings.Replace(b.String(), ",", "(", 1)
-	return &placeholder
 }

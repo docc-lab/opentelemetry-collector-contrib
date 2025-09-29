@@ -57,11 +57,11 @@ func (f internalFilterStrict) matchMetric(metric pmetric.Metric) bool {
 	return false
 }
 
-func (f internalFilterStrict) submatches(_ pmetric.Metric) []int {
+func (internalFilterStrict) submatches(pmetric.Metric) []int {
 	return nil
 }
 
-func (f internalFilterStrict) expand(_, _ string) string {
+func (internalFilterStrict) expand(string, string) string {
 	return ""
 }
 
@@ -545,7 +545,8 @@ func transformMetric(metric pmetric.Metric, transform internalTransform) bool {
 		}
 	}
 
-	for _, op := range transform.Operations {
+	for i := range transform.Operations {
+		op := &transform.Operations[i]
 		switch op.configOperation.Action {
 		case updateLabel:
 			updateLabelOp(metric, op, transform.MetricIncludeFilter)

@@ -18,6 +18,7 @@ import (
 	"go.opentelemetry.io/collector/pdata/plog"
 	semconv "go.opentelemetry.io/otel/semconv/v1.27.0"
 
+	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/encoding/awslogsencodingextension/internal/constants"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/encoding/awslogsencodingextension/internal/metadata"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/encoding/awslogsencodingextension/internal/unmarshaler"
 )
@@ -72,11 +73,12 @@ func (s *s3AccessLogUnmarshaler) createLogs() (plog.Logs, plog.ResourceLogs, plo
 	scopeLogs := resourceLogs.ScopeLogs().AppendEmpty()
 	scopeLogs.Scope().SetName(metadata.ScopeName)
 	scopeLogs.Scope().SetVersion(s.buildInfo.Version)
+	scopeLogs.Scope().Attributes().PutStr(constants.FormatIdentificationTag, constants.FormatS3AccessLog)
 	return logs, resourceLogs, scopeLogs
 }
 
 // setResourceAttributes based on the resourceAttributes
-func (s *s3AccessLogUnmarshaler) setResourceAttributes(r *resourceAttributes, logs plog.ResourceLogs) {
+func (*s3AccessLogUnmarshaler) setResourceAttributes(r *resourceAttributes, logs plog.ResourceLogs) {
 	attr := logs.Resource().Attributes()
 	attr.PutStr(string(semconv.CloudProviderKey), semconv.CloudProviderAWS.Value.AsString())
 	if r.bucketName != "" {
@@ -110,7 +112,7 @@ func scanField(logLine string) (string, string, error) {
 	}
 
 	// Remove space after closing quote if present
-	if len(remaining) > 0 && remaining[0] == ' ' {
+	if remaining != "" && remaining[0] == ' ' {
 		remaining = remaining[1:]
 	}
 
@@ -151,7 +153,7 @@ func handleLog(resourceAttr *resourceAttributes, scopeLogs plog.ScopeLogs, log s
 			value = value + " " + zone
 		}
 
-		if err = addField(i, value, resourceAttr, record); err != nil {
+		if err := addField(i, value, resourceAttr, record); err != nil {
 			return err
 		}
 	}

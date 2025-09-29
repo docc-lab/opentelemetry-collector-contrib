@@ -7,6 +7,158 @@ If you are looking for user-facing changes, check out [CHANGELOG.md](./CHANGELOG
 
 <!-- next version -->
 
+## v0.136.0
+
+### 🛑 Breaking changes 🛑
+
+- `datadogexporter`: Deprecate zorkian codepath (#17373)
+  Feature gate exporter.datadogexporter.metricexportnativeclient is now deprecated; the default metrics exporter is now 
+  Metrics Export Serializer unless feature gate exporter.datadogexporter.metricexportserializerclient is disabled. 
+  See https://github.com/open-telemetry/opentelemetry-collector-contrib/releases/tag/v0.122.0 and #37930 for more 
+  info about Metrics Export Serializer. 
+  
+- `pkg/translator/prometheusremotewrite`: Function 'OtelMetricsToMetadata' now returns an error if unable to convert a metric to metadata (#42493)
+
+<!-- previous-version -->
+
+## v0.135.0
+
+### 💡 Enhancements 💡
+
+- `datadog`: remove references to `DataDog/opentelemetry-mapping-go` library in favor of `DataDog/datadog-agent/pkg/opentelemetry-mapping-go` (#42475)
+  No change to end user behavior.
+
+<!-- previous-version -->
+
+## v0.134.0
+
+<!-- previous-version -->
+
+## v0.133.0
+
+### 🛑 Breaking changes 🛑
+
+- `signaltometricsconnector`: Use configoptional for optional metric fields (#41922)
+- `azureauthextension`: Use configoptional for optional fields in azureauthextension config. (#41926)
+- `libhoneyreceiver`: Use configoptional for HTTP config in libhoneyreceiver (#41974)
+- `sumologicprocessor`: Remove unnecessary pointer for types in configuration struct. (#41928)
+- `receiver/prometheus`: Use configoptional for optional fields (#42140)
+- `prometheusremotewriteexporter`: Use configoptional for WAL configuration (#41980)
+- `jaegerreceiver`: Use configoptional for optional protocol sections. (#41982)
+- `pulsarreceiver`: Use configoptional for optional authentication fields. (#41920)
+- `awscloudwatchreceiver`: Remove pointer from type of config (#41975)
+- `mongodbatlasreceiver`: Use configoptional and remove pointer for Config fields (#41939)
+- `solacereceiver`: Use configoptional for optional types (#41977)
+- `spanmetricsconnector`: Use configoptional for optional fields (#41941)
+
+### 🚩 Deprecations 🚩
+
+- `opencensusreceiver, opencensusexporter`: Deprecate opencensusreceiver and opencensusexporter. (#36791)
+
+### 💡 Enhancements 💡
+
+- `filterprocessor`: Create `With*Functions` factory options to provide custom OTTL functions for logs, metrics or traces to the resulting filter processor. (#40948)
+- `oidcauthextension`: Add support for accessing custom JWT claims. (#41449)
+  Users can now access JWT claims from OIDC Auth context allowing dynamic processing based on received JWT token.
+  
+
+<!-- previous-version -->
+
+## v0.132.0
+
+### 🛑 Breaking changes 🛑
+
+- `journaldreceiver`: Unexport ReceiverType (#40666)
+- `pulsarexporter`: Use `configoptional.Optional` for authentication fields (#41723)
+- `exporter/loadbalancingexporter`: Use `configoptional` for optional config sections (#41697)
+
+### 💡 Enhancements 💡
+
+- `pkg/ottl`: Add OTTL support for sample submessage of OTel Profiling signal. (#40161)
+- `internal/common`: Add a priority queue implementation to the common package. (#41755)
+
+<!-- previous-version -->
+
+## v0.131.0
+
+### 🛑 Breaking changes 🛑
+
+- `metricstransformprocessor`: Unexport Operation, ValueAction, FilterConfig (#40657)
+- `oidcauthextension`: Unexport ProviderContainer (#41633)
+- `pkg/ottl`: Remove experimental transform context option `WithCache` from OTTL Profile context. (#41277)
+- `tailsamplingprocessor`: Latency config name change from `UpperThresholdmsMs` to `UpperThresholdMs` (#41563)
+- `awskinesisexporter`: Unexport Exporter (#40645)
+- `deltatocumulativeprocessor`: Unexport Processor,CountingSink (#40656)
+- `datasetexporter`: Unexport DatasetExporter, ExporterConfig (#40649)
+
+### 💡 Enhancements 💡
+
+- `oidcauthextension`: Add support for multiple OIDC providers. (#40854)
+  Users can now configure multiple OIDC providers in the OIDC Auth extension. Tokens will
+  be matched to a provider based on the `iss` claim.
+  
+- `pkg/ottl`: Add support for combining `scope` with other OTTL contexts. (#39308)
+  Previously, OTTL paths could only use the `instrumentation_scope` context when combined with 
+  lower-level contexts like `log` or `metric`. This change allows the `scope` context to be 
+  used interchangeably with `instrumentation_scope`, improving flexibility and consistency.
+  
+
+<!-- previous-version -->
+
+## v0.130.0
+
+### 🛑 Breaking changes 🛑
+
+- `splunkhecexporter`: Update 'batcher' config to use internal deprecated struct instead of the one removed from the core. (#41224)
+- `elasticsearchexporter`: Update 'batcher' config to use internal struct instead of the one removed from the core. (#41225)
+- `sumologicprocessor`: Types that do not contribute to intended API surface will be unexported (#40660)
+  https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/40641
+
+### 💡 Enhancements 💡
+
+- `pkg/ottl`: Add a `GetOr` function to `ottl.Optional` to return a default value when the optional is empty. (#40243)
+- `metricstarttimeprocessor`: Add the start_time_metric, which sets the start time based on another metric in the batch of metrics. (#38383)
+
+<!-- previous-version -->
+
+## v0.129.0
+
+### 🛑 Breaking changes 🛑
+
+- `azuremonitorexporter`: Unexport MessagingAttributes,ExceptionAttributes,DatabaseAttributes,RPCAttributes,HTTPAttributes,ConnectionVars,NetworkAttributes (#40648)
+- `sentryexporter`: unexport structs and methods which should be private (#40651)
+- `datadogreceiver`: Unexport `Endpoint` struct (#40663)
+- `azureeventhubreceiver`: Unexport AzureResourceLogsEventUnmarshaler (#40661)
+- `kineticaexporter`: unexport structs (#40680)
+  ｜ unexport SumScopeAttribute,ExponentialHistogramResourceAttribute,ExponentialHistogramDataPointAttribute, SummaryResourceAttribute,SummaryDataPointAttribute,Summary,HistogramScopeAttribute,HistogramDatapointExplicitBound, Histogram,GaugeScopeAttribute,ExponentialHistogramDataPointExemplarAttribute,ValueTypePair,HistogramDatapointExemplar, GaugeDataPointExemplarAttribute,HistogramDatapointBucketCount,HistogramDataPointAttribute,GaugeDatapointAttribute, ExponentialHistogramDatapoint,ExponentialHistogram,SumResourceAttribute,SumDatapoint,SummaryDatapointQuantileValues, Sum,KiWriter,HistogramResourceAttribute,HistogramDatapoint,GaugeResourceAttribute,GaugeDatapointExemplar, ExponentialHistogramBucketNegativeCount,SumDataPointExemplarAttribute,GaugeDatapoint,Gauge,ExponentialHistogramScopeAttribute, ExponentialHistogramBucketPositiveCount,AttributeValue,SummaryScopeAttribute,SumDatapointExemplar,SumDataPointAttribute, HistogramDataPointExemplarAttribute,ExponentialHistogramDatapointExemplar,SummaryDatapoint
+- `mysqlreceiver`: Unexport TableStats,TableIoWaitsStats,StatementEventStats,ReplicaStatusStats,IoWaitsStats,IndexIoWaitsStats,MySQLTestConfig structs from mysqlreceiver (#40671)
+- `sumologicextension`: Unexport ErrorAPI (#40655)
+- `prometheusremotewritereceiver`: Unexport MockConsumer,MetricIdentity structs (#40673)
+- `snmpreceiver`: Unexport SNMPData (#40543)
+- `azuredataexplorerexporter`: Unexport Status, Link, AdxTrace, AdxLog, Event, AdxMetric (#40647)
+- `bearertokenauthextension`: Unexport BearerAuthRoundTripper,PerRPCAuth,BearerTokenAuth (#40652)
+- `podmanreceiver`: Unexport ContainerScraper (#40672)
+- `alibabacloudlogserviceexporter`: Unexport KeyValues,KeyValue structs (#40644)
+- `libhoneyreceiver`: remove unused EnvironmentInfo,AuthInfo,TeamInfo (#40669)
+
+### 💡 Enhancements 💡
+
+- `hostmetricsreceiver`: Skeleton nfsscraper -- adds Linux nfs and nfsd metrics from /proc (#39978)
+- `sqlserverreceiver`: do not export Item struct (#40676)
+- `transformprocessor`: Create `With*Functions` factory options to provide custom OTTL functions for logs, metrics or traces to the resulting transform processor. (#39698)
+- `pkg/datadog`: Exposes 'SerializerWithForwarder' interface to allow for direct interaction with the underlying forwarder's lifecycle methods. (#40637)
+- `pkg/datadog`: Creates `agentcomponents` package to be used in Datadog components that rely on external dependencies. (#40532, #40556, #40560)
+  Deprecates `datadog.Zaplogger` in favor of `agentcomponents.ZapLogger`.
+- `pkg/ottl`: Add context inference support for OTTL value expressions (#39158)
+- `pkg/ottl`: Add new ContainsValue converter to check whether a value is present in a slice. (#30420)
+  Add `ottl.PSliceGetter`, a typed getter for `pcommon.Slice`
+  
+- `postgresqlreceiver`: Adopt mdatagen events for postgresqlreceiver. (#40549)
+- `sqlqueryreceiver`: Add SQL connection fields `host`, `port`, `database`, `username`, `password`, and `additional_params`. (#39760)
+  These options can be used instead of the existing `datasource` configuration option.
+
+<!-- previous-version -->
+
 ## v0.128.0
 
 ### 🛑 Breaking changes 🛑

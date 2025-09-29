@@ -15,6 +15,8 @@ import (
 	krb5config "github.com/jcmturner/gokrb5/v8/config"
 	"github.com/jcmturner/gokrb5/v8/keytab"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/kmsg"
+	"github.com/twmb/franz-go/pkg/kversion"
 	"github.com/twmb/franz-go/pkg/sasl"
 	"github.com/twmb/franz-go/pkg/sasl/kerberos"
 	"github.com/twmb/franz-go/pkg/sasl/oauth"
@@ -39,6 +41,7 @@ func NewFranzSyncProducer(ctx context.Context, clientCfg configkafka.ClientConfi
 	cfg configkafka.ProducerConfig,
 	timeout time.Duration,
 	logger *zap.Logger,
+	opts ...kgo.Opt,
 ) (*kgo.Client, error) {
 	codec := compressionCodec(cfg.Compression)
 	switch cfg.CompressionParams.Level {
@@ -46,14 +49,15 @@ func NewFranzSyncProducer(ctx context.Context, clientCfg configkafka.ClientConfi
 	default:
 		codec = codec.WithLevel(int(cfg.CompressionParams.Level))
 	}
-	opts, err := commonOpts(ctx, clientCfg, logger,
+	opts, err := commonOpts(ctx, clientCfg, logger, append(
+		opts,
 		kgo.ProduceRequestTimeout(timeout),
 		kgo.ProducerBatchCompression(codec),
 		// Use the UniformBytesPartitioner that is the default in franz-go with
 		// the legacy compatibility sarama hashing to avoid hashing to different
 		// partitions in case partitioning is enabled.
 		kgo.RecordPartitioner(newSaramaCompatPartitioner()),
-	)
+	)...)
 	if err != nil {
 		return nil, err
 	}
@@ -63,12 +67,10 @@ func NewFranzSyncProducer(ctx context.Context, clientCfg configkafka.ClientConfi
 		opts = append(opts, kgo.RequiredAcks(kgo.AllISRAcks()))
 	case configkafka.NoResponse:
 		// NOTE(marclop) only disable if acks != all.
-		opts = append(opts, kgo.DisableIdempotentWrite())
-		opts = append(opts, kgo.RequiredAcks(kgo.NoAck()))
+		opts = append(opts, kgo.DisableIdempotentWrite(), kgo.RequiredAcks(kgo.NoAck()))
 	default: // WaitForLocal
 		// NOTE(marclop) only disable if acks != all.
-		opts = append(opts, kgo.DisableIdempotentWrite())
-		opts = append(opts, kgo.RequiredAcks(kgo.LeaderAck()))
+		opts = append(opts, kgo.DisableIdempotentWrite(), kgo.RequiredAcks(kgo.LeaderAck()))
 	}
 
 	// Configure max message size
@@ -80,6 +82,10 @@ func NewFranzSyncProducer(ctx context.Context, clientCfg configkafka.ClientConfi
 	// Configure batch size
 	if cfg.FlushMaxMessages > 0 {
 		opts = append(opts, kgo.MaxBufferedRecords(cfg.FlushMaxMessages))
+	}
+	// Configure auto topic creation
+	if cfg.AllowAutoTopicCreation {
+		opts = append(opts, kgo.AllowAutoTopicCreation())
 	}
 
 	return kgo.NewClient(opts...)
@@ -180,10 +186,18 @@ func commonOpts(ctx context.Context, clientCfg configkafka.ClientConfig,
 	opts = append(opts,
 		kgo.WithLogger(kzap.New(logger.Named("franz"))),
 		kgo.SeedBrokers(clientCfg.Brokers...),
+		// Disable client metrics, since some brokers may falsely indicate
+		// that they support them when they don't, causing errors to be
+		// logged. We may want to make this configurable in the future.
+		kgo.DisableClientMetrics(),
 	)
+	tlsConfig := clientCfg.TLS
+	if tlsConfig == nil {
+		tlsConfig = clientCfg.Authentication.TLS
+	}
 	// Configure TLS if needed
-	if clientCfg.TLS != nil {
-		tlsCfg, err := clientCfg.TLS.LoadTLSConfig(ctx)
+	if tlsConfig != nil {
+		tlsCfg, err := tlsConfig.LoadTLSConfig(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load TLS config: %w", err)
 		}
@@ -216,6 +230,29 @@ func commonOpts(ctx context.Context, clientCfg configkafka.ClientConfig,
 	// Configure client ID
 	if clientCfg.ClientID != "" {
 		opts = append(opts, kgo.ClientID(clientCfg.ClientID))
+	}
+	// Configure client rack if provided
+	if clientCfg.RackID != "" {
+		opts = append(opts, kgo.Rack(clientCfg.RackID))
+	}
+	// Reuse existing metadata refresh interval for franz-go metadataMaxAge
+	if clientCfg.Metadata.RefreshInterval > 0 {
+		opts = append(opts, kgo.MetadataMaxAge(clientCfg.Metadata.RefreshInterval))
+	}
+	// Configure the min/max protocol version if provided
+	if clientCfg.ProtocolVersion != "" {
+		keyVersions := make(map[string]any)
+		versions := kversion.FromString(clientCfg.ProtocolVersion)
+		versions.EachMaxKeyVersion(func(k, v int16) {
+			name := kmsg.NameForKey(k)
+			keyVersions[name] = v
+		})
+		logger.Info(
+			"setting kafka protocol version",
+			zap.String("version", clientCfg.ProtocolVersion),
+			zap.Any("key_versions", keyVersions),
+		)
+		opts = append(opts, kgo.MinVersions(versions), kgo.MaxVersions(versions))
 	}
 	return opts, nil
 }

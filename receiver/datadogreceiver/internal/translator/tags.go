@@ -13,7 +13,7 @@ import (
 
 // See:
 // https://docs.datadoghq.com/opentelemetry/schema_semantics/semantic_mapping/
-// https://github.com/DataDog/opentelemetry-mapping-go/blob/main/pkg/otlp/attributes/attributes.go
+// https://github.com/DataDog/datadog-agent/blob/main/pkg/opentelemetry-mapping-go/otlp/attributes/attributes.go
 var datadogKnownResourceAttributes = map[string]string{
 	"env":     string(semconv.DeploymentEnvironmentNameKey),
 	"service": string(semconv.ServiceNameKey),
@@ -76,7 +76,7 @@ var datadogKnownResourceAttributes = map[string]string{
 }
 
 // translateDatadogTagToKeyValuePair translates a Datadog tag to a key value pair
-func translateDatadogTagToKeyValuePair(tag string) (key string, value string) {
+func translateDatadogTagToKeyValuePair(tag string) (key, value string) {
 	if tag == "" {
 		return "", ""
 	}

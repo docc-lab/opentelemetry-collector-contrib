@@ -125,7 +125,8 @@ func (cdr *collectdReceiver) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	metrics := pmetric.NewMetrics()
 	scopeMetrics := metrics.ResourceMetrics().AppendEmpty().ScopeMetrics().AppendEmpty()
-	for _, record := range records {
+	for i := range records {
+		record := &records[i]
 		err = record.appendToMetrics(cdr.logger, scopeMetrics, defaultAttrs)
 		if err != nil {
 			cdr.obsrecv.EndMetricsOp(ctx, metadata.Type.String(), len(records), err)
@@ -158,7 +159,7 @@ func (cdr *collectdReceiver) defaultAttributes(req *http.Request) map[string]str
 	for key := range params {
 		if strings.HasPrefix(key, cdr.defaultAttrsPrefix) {
 			value := params.Get(key)
-			if len(value) == 0 {
+			if value == "" {
 				cdr.logger.Debug("blank attribute value", zap.String("key", key))
 				continue
 			}

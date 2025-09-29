@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package agentcontact;
+
+option go_package = "github.com/open-telemetry/opentelemetry-collector-contrib/internal/common/agentcontact/protocol";
+
+// AgentContact service defines the gRPC interface for agent contact protocol
+service AgentContact {
+  // SendTraceIDs sends a list of trace IDs to the remote collector
+  rpc SendTraceIDs(TraceIDRequest) returns (TraceIDResponse);
+}
+
+// TraceIDRequest contains a list of trace IDs and span IDs to be processed
+message TraceIDRequest {
+  repeated string trace_ids = 1;
+  repeated string span_ids = 2;
+}
+
+// TraceIDResponse contains the acknowledgment from the remote collector
+message TraceIDResponse {
+  bool ack = 1;
+} 

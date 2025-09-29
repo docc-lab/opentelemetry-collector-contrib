@@ -48,7 +48,7 @@ If the official plugin doesn't meet your needs, you can try the [Altinity plugin
 - Get log severity count time series.
 
 ```sql
-SELECT toDateTime(toStartOfInterval(TimestampTime, INTERVAL 60 second)) as time, SeverityText, count() as count
+SELECT toDateTime(toStartOfInterval(Timestamp, INTERVAL 60 second)) as time, SeverityText, count() as count
 FROM otel_logs
 WHERE time >= NOW() - INTERVAL 1 HOUR
 GROUP BY SeverityText, time
@@ -60,7 +60,7 @@ ORDER BY time;
 ```sql
 SELECT Timestamp as log_time, Body
 FROM otel_logs
-WHERE TimestampTime >= NOW() - INTERVAL 1 HOUR
+WHERE Timestamp >= NOW() - INTERVAL 1 HOUR
 Limit 100;
 ```
 
@@ -70,7 +70,7 @@ Limit 100;
 SELECT Timestamp as log_time, Body
 FROM otel_logs
 WHERE ServiceName = 'clickhouse-exporter'
-  AND TimestampTime >= NOW() - INTERVAL 1 HOUR
+  AND Timestamp >= NOW() - INTERVAL 1 HOUR
 Limit 100;
 ```
 
@@ -80,7 +80,7 @@ Limit 100;
 SELECT Timestamp as log_time, Body
 FROM otel_logs
 WHERE LogAttributes['container_name'] = '/example_flog_1'
-  AND TimestampTime >= NOW() - INTERVAL 1 HOUR
+  AND Timestamp >= NOW() - INTERVAL 1 HOUR
 Limit 100;
 ```
 
@@ -90,7 +90,7 @@ Limit 100;
 SELECT Timestamp as log_time, Body
 FROM otel_logs
 WHERE hasToken(Body, 'http')
-  AND TimestampTime >= NOW() - INTERVAL 1 HOUR
+  AND Timestamp >= NOW() - INTERVAL 1 HOUR
 Limit 100;
 ```
 
@@ -100,7 +100,7 @@ Limit 100;
 SELECT Timestamp as log_time, Body
 FROM otel_logs
 WHERE Body like '%http%'
-  AND TimestampTime >= NOW() - INTERVAL 1 HOUR
+  AND Timestamp >= NOW() - INTERVAL 1 HOUR
 Limit 100;
 ```
 
@@ -110,7 +110,7 @@ Limit 100;
 SELECT Timestamp as log_time, Body
 FROM otel_logs
 WHERE match(Body, 'http')
-  AND TimestampTime >= NOW() - INTERVAL 1 HOUR
+  AND Timestamp >= NOW() - INTERVAL 1 HOUR
 Limit 100;
 ```
 
@@ -120,7 +120,7 @@ Limit 100;
 SELECT Timestamp as log_time, Body
 FROM otel_logs
 WHERE JSONExtractFloat(Body, 'bytes') > 1000
-  AND TimestampTime >= NOW() - INTERVAL 1 HOUR
+  AND Timestamp >= NOW() - INTERVAL 1 HOUR
 Limit 100;
 ```
 
@@ -290,6 +290,7 @@ Connection options:
 - `create_schema` (default = true): When set to true, will run DDL to create the database and tables. (See [schema management](#schema-management))
 - `compress` (default = lz4): Controls the compression algorithm. Valid options: `none` (disabled), `zstd`, `lz4` (default), `gzip`, `deflate`, `br`, `true` (lz4). Ignored if `compress` is set in the `endpoint` or `connection_params`.
 - `async_insert` (default = true): Enables [async inserts](https://clickhouse.com/docs/en/optimize/asynchronous-inserts). Ignored if async inserts are configured in the `endpoint` or `connection_params`. Async inserts may still be overridden server-side.
+- `tls` Advanced TLS configuration (See [TLS](#tls)).
 
 Additional DSN features:
 
@@ -342,17 +343,32 @@ Processing:
 
 ## TLS
 
-The exporter supports TLS. To enable TLS, you need to specify the `secure=true` query parameter in the `endpoint` URL or
-use the `https` scheme.
+The exporter supports TLS. To enable TLS, you must specify the `secure=true` query parameter in the `endpoint` URL or use the `https` scheme.
+
+You may also use certificate authentication with the `tls` setting:
+
+```yaml
+exporters:
+  clickhouse:
+    endpoint: . . .
+    tls:
+      insecure: false
+      insecure_skip_verify: false
+      ca_file: CAroot.crt
+      cert_file: client.crt
+      key_file: client.key
+```
+
+The available `tls` options are inherited from [OpenTelemetry's TLS config structure](https://pkg.go.dev/go.opentelemetry.io/collector/config/configtls#ClientConfig), more options are available than shown in this example.
 
 ## Schema management
 
-By default the exporter will create the database and tables under the names defined in the config. This is fine for simple deployments, but for production workloads, it is recommended that you manage your own schema by setting `create_schema` to `false` in the config.
+By default, the exporter will create the database and tables under the names defined in the config. This is fine for simple deployments, but for production workloads, it is recommended that you manage your own schema by setting `create_schema` to `false` in the config.
 This prevents each exporter process from racing to create the database and tables, and makes it easier to upgrade the exporter in the future.
 
 In this mode, the only SQL sent to your server will be for `INSERT` statements.
 
-The default DDL used by the exporter can be found in `example/default_ddl`.
+The default DDL used by the exporter can be found in `internal/sqltemplates`.
 Be sure to customize the indexes, TTL, and partitioning to fit your deployment.
 Column names and types must be the same to preserve compatibility with the exporter's `INSERT` statements.
 As long as the column names/types match the `INSERT` statement, you can create whatever kind of table you want.
@@ -367,10 +383,6 @@ The data is stored for 72 hours (3 days).
 ```yaml
 receivers:
   examplereceiver:
-processors:
-  batch:
-    timeout: 5s
-    send_batch_size: 100000
 exporters:
   clickhouse:
     endpoint: tcp://127.0.0.1:9000?dial_timeout=10s
@@ -406,9 +418,17 @@ service:
   pipelines:
     logs:
       receivers: [ examplereceiver ]
-      processors: [ batch ]
       exporters: [ clickhouse ]
 ```
+
+## Experimental JSON support
+
+A feature gate is available for testing the experimental JSON pipeline.
+Enable the `clickhouse.json` feature gate by following the [feature gate documentation](https://github.com/open-telemetry/opentelemetry-collector/blob/main/featuregate/README.md).
+You may also need to add `enable_json_type=1` to your `endpoint` query string parameters.
+DDL has been updated, but feel free to tune the schema as needed. DDL can be found in the `internal/sqltemplates` package.
+All `Map` columns have been replaced with `JSON`.
+ClickHouse v25+ is recommended for reliable JSON support.
 
 ## Contributing
 
@@ -416,8 +436,8 @@ Before contributing, review the contribution guidelines in [CONTRIBUTING.md](htt
 
 #### Integration tests
 
-Integration tests can be run with the following command:
+Integration tests can be run with the following command (includes unit tests):
 ```sh
-go test -tags integration -run=TestIntegration
+go test -tags integration
 ```
 *Note: Make sure integration tests pass after making changes to SQL.*

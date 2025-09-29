@@ -15,6 +15,10 @@ type Config struct {
 
 	// EnableMetrics enables metrics collection for the processor
 	EnableMetrics bool `mapstructure:"enable_metrics"`
+
+	// ExportIntervalSeconds defines how often to check for new spans to export
+	// Default is 5 seconds
+	ExportIntervalSeconds int `mapstructure:"export_interval_seconds"`
 }
 
 var _ component.Config = (*Config)(nil)

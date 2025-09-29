@@ -6,7 +6,6 @@
 package clickhouseexporter
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -25,17 +24,16 @@ func testTracesExporter(t *testing.T, endpoint string) {
 func newTestTracesExporter(t *testing.T, dsn string, fns ...func(*Config)) *tracesExporter {
 	exporter := newTracesExporter(zaptest.NewLogger(t), withTestExporterConfig(fns...)(dsn))
 
-	require.NoError(t, exporter.start(context.Background(), nil))
+	require.NoError(t, exporter.start(t.Context(), nil))
 
-	t.Cleanup(func() { _ = exporter.shutdown(context.Background()) })
+	t.Cleanup(func() { _ = exporter.shutdown(t.Context()) })
 	return exporter
 }
 
 func verifyExportTraces(t *testing.T, exporter *tracesExporter) {
-	// 3 pushes
-	mustPushTracesData(t, exporter, simpleTraces(5000))
-	mustPushTracesData(t, exporter, simpleTraces(5000))
-	mustPushTracesData(t, exporter, simpleTraces(5000))
+	pushConcurrentlyNoError(t, func() error {
+		return exporter.pushTraceData(t.Context(), simpleTraces(5000))
+	})
 
 	type trace struct {
 		Timestamp          time.Time           `ch:"Timestamp"`
@@ -107,7 +105,7 @@ func verifyExportTraces(t *testing.T, exporter *tracesExporter) {
 		},
 	}
 
-	row := exporter.db.QueryRow(context.Background(), "SELECT * FROM otel_int_test.otel_traces")
+	row := exporter.db.QueryRow(t.Context(), "SELECT * FROM otel_int_test.otel_traces")
 	require.NoError(t, row.Err())
 
 	var actualTrace trace
@@ -115,11 +113,6 @@ func verifyExportTraces(t *testing.T, exporter *tracesExporter) {
 	require.NoError(t, err)
 
 	require.Equal(t, expectedTrace, actualTrace)
-}
-
-func mustPushTracesData(t *testing.T, exporter *tracesExporter, td ptrace.Traces) {
-	err := exporter.pushTraceData(context.Background(), td)
-	require.NoError(t, err)
 }
 
 func simpleTraces(count int) ptrace.Traces {

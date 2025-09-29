@@ -16,21 +16,24 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 
-	"github.com/open-telemetry/opentelemetry-collector-contrib/exporter/agentcontactexporter/internal/protocol"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/common/agentcontact/protocol"
 )
+
+// GlobalSpanReconstructionProcessor is the global instance that other processors can access
+var GlobalAgentContactExporter *AgentContactExporter
 
 // ipBatchManager manages batching for a specific upstream IP
 type ipBatchManager struct {
-	ip           string
-	endpoint     string
-	traceIDs     []string
-	batchSize    int
-	batchTimeout time.Duration
-	timer        *time.Timer
-	timerChan    chan struct{}
-	client       protocol.AgentContactClient
-	logger       *zap.Logger
-	timeout      time.Duration
+	ip             string
+	endpoint       string
+	traceSpanPairs []TraceSpanPair
+	batchSize      int
+	batchTimeout   time.Duration
+	timer          *time.Timer
+	timerChan      chan struct{}
+	client         protocol.AgentContactClient
+	logger         *zap.Logger
+	timeout        time.Duration
 
 	// Channels for communication
 	flushChan chan struct{}
@@ -39,19 +42,19 @@ type ipBatchManager struct {
 }
 
 // newIPBatchManager creates a new batch manager for a specific IP
-func newIPBatchManager(ip string, endpoint string, batchSize int, batchTimeout time.Duration, timeout time.Duration, client protocol.AgentContactClient, logger *zap.Logger) *ipBatchManager {
+func newIPBatchManager(ip, endpoint string, batchSize int, batchTimeout, timeout time.Duration, client protocol.AgentContactClient, logger *zap.Logger) *ipBatchManager {
 	bm := &ipBatchManager{
-		ip:           ip,
-		endpoint:     endpoint,
-		traceIDs:     make([]string, 0, batchSize),
-		batchSize:    batchSize,
-		batchTimeout: batchTimeout,
-		timeout:      timeout,
-		client:       client,
-		logger:       logger,
-		flushChan:    make(chan struct{}, 1),
-		stopChan:     make(chan struct{}),
-		timerChan:    make(chan struct{}, 1),
+		ip:             ip,
+		endpoint:       endpoint,
+		traceSpanPairs: make([]TraceSpanPair, 0, batchSize),
+		batchSize:      batchSize,
+		batchTimeout:   batchTimeout,
+		timeout:        timeout,
+		client:         client,
+		logger:         logger,
+		flushChan:      make(chan struct{}, 1),
+		stopChan:       make(chan struct{}),
+		timerChan:      make(chan struct{}, 1),
 	}
 
 	// Start the batch management goroutine
@@ -82,23 +85,42 @@ func (bm *ipBatchManager) run() {
 }
 
 // addTraceID adds a trace ID to the batch and potentially triggers a flush
-func (bm *ipBatchManager) addTraceID(traceID string) {
-	bm.traceIDs = append(bm.traceIDs, traceID)
+func (bm *ipBatchManager) addTraceSpanPair(pair TraceSpanPair) {
+	bm.traceSpanPairs = append(bm.traceSpanPairs, pair)
+
+	bm.logger.Debug("🟠 Batch Manager: Added trace+span ID pair to batch",
+		zap.String("ip", bm.ip),
+		zap.String("trace_id", pair.TraceID),
+		zap.String("span_id", pair.SpanID),
+		zap.Int("current_batch_size", len(bm.traceSpanPairs)),
+		zap.Int("batch_size_limit", bm.batchSize))
 
 	// If batch is full, trigger flush
-	if len(bm.traceIDs) >= bm.batchSize {
+	if len(bm.traceSpanPairs) >= bm.batchSize {
+		bm.logger.Info("🟢 Batch Manager: Batch size limit reached, triggering flush",
+			zap.String("ip", bm.ip),
+			zap.Int("batch_size", len(bm.traceSpanPairs)))
 		select {
 		case bm.flushChan <- struct{}{}:
 		default:
 			// Channel is full, flush is already pending
+			bm.logger.Debug("🟠 Batch Manager: Flush already pending",
+				zap.String("ip", bm.ip))
 		}
 	} else if bm.timer == nil {
 		// Start timer for this batch
+		bm.logger.Debug("🟠 Batch Manager: Starting batch timeout timer",
+			zap.String("ip", bm.ip),
+			zap.Duration("timeout", bm.batchTimeout))
 		bm.timer = time.AfterFunc(bm.batchTimeout, func() {
+			bm.logger.Debug("🟠 Batch Manager: Batch timeout reached",
+				zap.String("ip", bm.ip))
 			select {
 			case bm.timerChan <- struct{}{}:
 			default:
 				// Channel is full, timeout is already pending
+				bm.logger.Debug("🟠 Batch Manager: Timeout already pending",
+					zap.String("ip", bm.ip))
 			}
 		})
 	}
@@ -106,37 +128,70 @@ func (bm *ipBatchManager) addTraceID(traceID string) {
 
 // flushBatch sends the current batch and resets the timer
 func (bm *ipBatchManager) flushBatch() {
-	if len(bm.traceIDs) == 0 {
+	if len(bm.traceSpanPairs) == 0 {
+		bm.logger.Debug("🟠 Batch Manager: No trace IDs to flush",
+			zap.String("ip", bm.ip))
 		return
 	}
+
+	bm.logger.Info("🟢 Batch Manager: Flushing batch",
+		zap.String("ip", bm.ip),
+		zap.String("endpoint", bm.endpoint),
+		zap.Int("pair_count", len(bm.traceSpanPairs)))
 
 	// Stop the current timer
 	if bm.timer != nil {
 		bm.timer.Stop()
 		bm.timer = nil
+		bm.logger.Debug("🟠 Batch Manager: Stopped batch timer",
+			zap.String("ip", bm.ip))
 	}
 
 	// Send the batch
 	if err := bm.sendBatch(); err != nil {
-		bm.logger.Error("Failed to send batch",
+		bm.logger.Error("🟡 Batch Manager: Failed to send batch",
 			zap.String("ip", bm.ip),
 			zap.String("endpoint", bm.endpoint),
 			zap.Error(err))
+	} else {
+		bm.logger.Info("🟢 Batch Manager: Successfully sent batch",
+			zap.String("ip", bm.ip),
+			zap.String("endpoint", bm.endpoint),
+			zap.Int("pair_count", len(bm.traceSpanPairs)))
 	}
 
 	// Clear the batch
-	bm.traceIDs = bm.traceIDs[:0]
+	bm.traceSpanPairs = bm.traceSpanPairs[:0]
+	bm.logger.Debug("🟠 Batch Manager: Cleared batch buffer",
+		zap.String("ip", bm.ip))
 }
 
-// sendBatch sends the current batch of trace IDs
+// sendBatch sends the current batch of trace+span ID pairs
 func (bm *ipBatchManager) sendBatch() error {
-	if len(bm.traceIDs) == 0 {
+	if len(bm.traceSpanPairs) == 0 {
+		bm.logger.Debug("🟠 Batch Manager: No trace+span ID pairs to send",
+			zap.String("ip", bm.ip))
 		return nil
+	}
+
+	bm.logger.Info("🟢 Batch Manager: Sending trace+span ID pairs via gRPC",
+		zap.String("ip", bm.ip),
+		zap.String("endpoint", bm.endpoint),
+		zap.Int("count", len(bm.traceSpanPairs)),
+		zap.Duration("timeout", bm.timeout))
+
+	// Extract trace IDs and span IDs from pairs
+	traceIDs := make([]string, len(bm.traceSpanPairs))
+	spanIDs := make([]string, len(bm.traceSpanPairs))
+	for i, pair := range bm.traceSpanPairs {
+		traceIDs[i] = pair.TraceID
+		spanIDs[i] = pair.SpanID
 	}
 
 	// Create request
 	req := &protocol.TraceIDRequest{
-		TraceIds: bm.traceIDs,
+		TraceIds: traceIDs,
+		SpanIds:  spanIDs,
 	}
 
 	// Send request with timeout
@@ -145,18 +200,25 @@ func (bm *ipBatchManager) sendBatch() error {
 
 	resp, err := bm.client.SendTraceIDs(ctx, req)
 	if err != nil {
+		bm.logger.Error("🟡 Batch Manager: gRPC call failed",
+			zap.String("ip", bm.ip),
+			zap.String("endpoint", bm.endpoint),
+			zap.Error(err))
 		return fmt.Errorf("failed to send trace IDs to %s: %w", bm.endpoint, err)
 	}
 
 	if !resp.Ack {
+		bm.logger.Error("🟡 Batch Manager: Remote collector did not acknowledge request",
+			zap.String("ip", bm.ip),
+			zap.String("endpoint", bm.endpoint))
 		return fmt.Errorf("remote collector at %s did not acknowledge trace ID request", bm.endpoint)
 	}
 
-	bm.logger.Debug("Successfully sent trace IDs",
+	bm.logger.Info("🟢 Batch Manager: Successfully sent trace IDs and received ACK",
 		zap.String("ip", bm.ip),
 		zap.String("endpoint", bm.endpoint),
-		zap.Int("count", len(bm.traceIDs)),
-		zap.Strings("trace_ids", bm.traceIDs))
+		zap.Int("count", len(traceIDs)),
+		zap.Strings("trace_ids", traceIDs))
 
 	return nil
 }
@@ -168,7 +230,7 @@ func (bm *ipBatchManager) shutdown() {
 }
 
 // agentContactExporter implements the exporter interface for sending trace ID requests.
-type agentContactExporter struct {
+type AgentContactExporter struct {
 	config   *Config
 	logger   *zap.Logger
 	settings exporter.Settings
@@ -184,26 +246,30 @@ type agentContactExporter struct {
 }
 
 // newAgentContactExporter creates a new agent contact exporter.
-func newAgentContactExporter(config *Config, settings exporter.Settings) (*agentContactExporter, error) {
-	return &agentContactExporter{
+func newAgentContactExporter(config *Config, settings exporter.Settings) (*AgentContactExporter, error) {
+	ace := &AgentContactExporter{
 		config:        config,
 		logger:        settings.Logger,
 		settings:      settings,
 		connections:   make(map[string]*grpc.ClientConn),
 		clients:       make(map[string]protocol.AgentContactClient),
 		batchManagers: make(map[string]*ipBatchManager),
-	}, nil
+	}
+
+	GlobalAgentContactExporter = ace
+
+	return ace, nil
 }
 
 // Start starts the exporter.
-func (e *agentContactExporter) Start(ctx context.Context, host component.Host) error {
+func (e *AgentContactExporter) Start(ctx context.Context, host component.Host) error {
 	e.logger.Info("Agent contact exporter started with dynamic endpoints",
 		zap.Int("default_port", e.config.DefaultPort))
 	return nil
 }
 
 // Shutdown shuts down the exporter.
-func (e *agentContactExporter) Shutdown(ctx context.Context) error {
+func (e *AgentContactExporter) Shutdown(ctx context.Context) error {
 	// Shutdown all batch managers
 	e.bmMutex.Lock()
 	for _, bm := range e.batchManagers {
@@ -226,35 +292,72 @@ func (e *agentContactExporter) Shutdown(ctx context.Context) error {
 }
 
 // ConsumeTraces processes traces and extracts trace IDs for lookup requests.
-func (e *agentContactExporter) ConsumeTraces(ctx context.Context, td ptrace.Traces) error {
+func (e *AgentContactExporter) ConsumeTraces(ctx context.Context, td ptrace.Traces) error {
+	e.logger.Info("🟢 Agent Contact Exporter: Processing traces",
+		zap.Int("resource_spans_count", td.ResourceSpans().Len()),
+		zap.Int("total_spans", e.countTotalSpans(td)))
+
 	// Extract trace IDs and upstream IPs from the traces
 	traceData := extractTraceIDsAndUpstreamIPs(td)
 
-	// Group trace IDs by upstream IP and add to appropriate batch managers
-	for upstreamIP, traceIDs := range traceData {
+	e.logger.Info("🟢 Agent Contact Exporter: Extracted trace data",
+		zap.Int("upstream_ips_count", len(traceData)))
+
+	// Group trace+span ID pairs by upstream IP and add to appropriate batch managers
+	for upstreamIP, traceSpanPairs := range traceData {
 		endpoint := fmt.Sprintf("%s:%d", upstreamIP, e.config.DefaultPort)
+
+		e.logger.Info("🟢 Agent Contact Exporter: Processing upstream IP",
+			zap.String("upstream_ip", upstreamIP),
+			zap.String("endpoint", endpoint),
+			zap.Int("trace_span_pairs_count", len(traceSpanPairs)))
 
 		// Get or create batch manager for this upstream IP
 		bm := e.getOrCreateBatchManager(upstreamIP, endpoint)
 
-		// Add trace IDs to the batch manager
-		for _, traceID := range traceIDs {
-			bm.addTraceID(traceID)
+		// Add trace+span ID pairs to the batch manager
+		for _, pair := range traceSpanPairs {
+			e.logger.Debug("🟠 Agent Contact Exporter: Enqueuing trace+span ID pair",
+				zap.String("upstream_ip", upstreamIP),
+				zap.String("trace_id", pair.TraceID),
+				zap.String("span_id", pair.SpanID))
+			bm.addTraceSpanPair(pair)
 		}
 	}
 
+	e.logger.Info("🟢 Agent Contact Exporter: Completed processing traces")
 	return nil
 }
 
+// countTotalSpans counts the total number of spans in a traces object
+func (e *AgentContactExporter) countTotalSpans(td ptrace.Traces) int {
+	total := 0
+	for i := 0; i < td.ResourceSpans().Len(); i++ {
+		resourceSpans := td.ResourceSpans().At(i)
+		for j := 0; j < resourceSpans.ScopeSpans().Len(); j++ {
+			scopeSpans := resourceSpans.ScopeSpans().At(j)
+			total += scopeSpans.Spans().Len()
+		}
+	}
+	return total
+}
+
 // getOrCreateBatchManager gets or creates a batch manager for a specific IP
-func (e *agentContactExporter) getOrCreateBatchManager(ip, endpoint string) *ipBatchManager {
+func (e *AgentContactExporter) getOrCreateBatchManager(ip, endpoint string) *ipBatchManager {
 	e.bmMutex.RLock()
 	bm, exists := e.batchManagers[ip]
 	e.bmMutex.RUnlock()
 
 	if exists {
+		e.logger.Debug("🟠 Agent Contact Exporter: Using existing batch manager",
+			zap.String("ip", ip),
+			zap.String("endpoint", endpoint))
 		return bm
 	}
+
+	e.logger.Info("🟢 Agent Contact Exporter: Creating new batch manager",
+		zap.String("ip", ip),
+		zap.String("endpoint", endpoint))
 
 	// Create new batch manager
 	e.bmMutex.Lock()
@@ -262,13 +365,15 @@ func (e *agentContactExporter) getOrCreateBatchManager(ip, endpoint string) *ipB
 
 	// Double-check after acquiring write lock
 	if bm, exists := e.batchManagers[ip]; exists {
+		e.logger.Debug("🟠 Agent Contact Exporter: Batch manager created by another goroutine",
+			zap.String("ip", ip))
 		return bm
 	}
 
 	// Get or create client for this endpoint
 	client, err := e.getClientForEndpoint(endpoint)
 	if err != nil {
-		e.logger.Error("Failed to get client for endpoint",
+		e.logger.Error("🟡 Agent Contact Exporter: Failed to get client for endpoint",
 			zap.String("endpoint", endpoint), zap.Error(err))
 		// Return a nil client - the batch manager will handle this gracefully
 		client = nil
@@ -286,22 +391,29 @@ func (e *agentContactExporter) getOrCreateBatchManager(ip, endpoint string) *ipB
 	)
 
 	e.batchManagers[ip] = bm
-	e.logger.Info("Created new batch manager",
+	e.logger.Info("🟢 Agent Contact Exporter: Successfully created new batch manager",
 		zap.String("ip", ip),
-		zap.String("endpoint", endpoint))
+		zap.String("endpoint", endpoint),
+		zap.Int("batch_size", e.config.BatchSize),
+		zap.Duration("batch_timeout", e.config.BatchTimeout))
 
 	return bm
 }
 
 // getClientForEndpoint gets or creates a gRPC client for the given endpoint.
-func (e *agentContactExporter) getClientForEndpoint(endpoint string) (protocol.AgentContactClient, error) {
+func (e *AgentContactExporter) getClientForEndpoint(endpoint string) (protocol.AgentContactClient, error) {
 	e.connMutex.RLock()
 	client, exists := e.clients[endpoint]
 	e.connMutex.RUnlock()
 
 	if exists {
+		e.logger.Debug("🟠 Agent Contact Exporter: Using existing gRPC connection",
+			zap.String("endpoint", endpoint))
 		return client, nil
 	}
+
+	e.logger.Info("🟢 Agent Contact Exporter: Creating new gRPC connection",
+		zap.String("endpoint", endpoint))
 
 	// Create new connection
 	e.connMutex.Lock()
@@ -309,19 +421,24 @@ func (e *agentContactExporter) getClientForEndpoint(endpoint string) (protocol.A
 
 	// Double-check after acquiring write lock
 	if client, exists := e.clients[endpoint]; exists {
+		e.logger.Debug("🟠 Agent Contact Exporter: Connection created by another goroutine",
+			zap.String("endpoint", endpoint))
 		return client, nil
 	}
 
 	// Create connection using the base config but with the dynamic endpoint
 	conn, err := grpc.Dial(endpoint, grpc.WithInsecure())
 	if err != nil {
+		e.logger.Error("🟡 Agent Contact Exporter: Failed to create gRPC connection",
+			zap.String("endpoint", endpoint), zap.Error(err))
 		return nil, fmt.Errorf("failed to create gRPC connection to %s: %w", endpoint, err)
 	}
 
 	e.connections[endpoint] = conn
 	e.clients[endpoint] = protocol.NewAgentContactClient(conn)
 
-	e.logger.Info("Created new connection", zap.String("endpoint", endpoint))
+	e.logger.Info("🟢 Agent Contact Exporter: Successfully created new gRPC connection",
+		zap.String("endpoint", endpoint))
 
 	return e.clients[endpoint], nil
 }
@@ -371,10 +488,18 @@ func extractTraceIDsAndIPs(td ptrace.Traces) map[string][]string {
 	return result
 }
 
-// extractTraceIDsAndUpstreamIPs extracts trace IDs grouped by upstream IP addresses from traces.
-func extractTraceIDsAndUpstreamIPs(td ptrace.Traces) map[string][]string {
-	// Map upstream IP -> trace IDs
-	upstreamIPToTraceIDs := make(map[string][]string)
+// TraceSpanPair represents a trace ID and span ID combination
+type TraceSpanPair struct {
+	TraceID string
+	SpanID  string
+}
+
+// extractTraceIDsAndUpstreamIPs extracts trace ID and span ID pairs grouped by upstream IP addresses from traces.
+func extractTraceIDsAndUpstreamIPs(td ptrace.Traces) map[string][]TraceSpanPair {
+	// Map upstream IP -> trace+span ID pairs
+	upstreamIPToTraceSpanPairs := make(map[string][]TraceSpanPair)
+	processedCount := 0
+	skippedCount := 0
 
 	for i := 0; i < td.ResourceSpans().Len(); i++ {
 		rs := td.ResourceSpans().At(i)
@@ -383,22 +508,31 @@ func extractTraceIDsAndUpstreamIPs(td ptrace.Traces) map[string][]string {
 			for k := 0; k < ss.Spans().Len(); k++ {
 				span := ss.Spans().At(k)
 				traceID := span.TraceID().String()
+				spanID := span.SpanID().String()
 
 				// Extract upstream IP from span attributes
 				upstreamIP := extractUpstreamIP(span)
 
-				if upstreamIP == "" {
-					// If no upstream IP found, use a default endpoint
-					upstreamIP = "localhost"
+				// Skip spans with unknown or invalid upstream IPs
+				if upstreamIP == "" || upstreamIP == "unknown-upstream" {
+					skippedCount++
+					continue // Discard this span
 				}
 
-				// Add trace ID to the upstream IP
-				upstreamIPToTraceIDs[upstreamIP] = append(upstreamIPToTraceIDs[upstreamIP], traceID)
+				// Add trace+span ID pair to the upstream IP
+				upstreamIPToTraceSpanPairs[upstreamIP] = append(upstreamIPToTraceSpanPairs[upstreamIP], TraceSpanPair{
+					TraceID: traceID,
+					SpanID:  spanID,
+				})
+				processedCount++
 			}
 		}
 	}
 
-	return upstreamIPToTraceIDs
+	// Log extraction results (this will be called from ConsumeTraces which has access to logger)
+	// Note: We can't access logger here since this is a standalone function
+
+	return upstreamIPToTraceSpanPairs
 }
 
 // extractIPAddresses extracts IP addresses from span attributes.
@@ -477,6 +611,6 @@ func extractTraceIDs(td ptrace.Traces) []string {
 }
 
 // Capabilities returns the capabilities of the exporter.
-func (e *agentContactExporter) Capabilities() consumer.Capabilities {
+func (e *AgentContactExporter) Capabilities() consumer.Capabilities {
 	return consumer.Capabilities{MutatesData: false}
 }

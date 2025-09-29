@@ -8,7 +8,7 @@ import (
 	"errors"
 	"fmt"
 
-	otlpmetrics "github.com/DataDog/opentelemetry-mapping-go/pkg/otlp/metrics"
+	otlpmetrics "github.com/DataDog/datadog-agent/pkg/opentelemetry-mapping-go/otlp/metrics"
 	"go.opentelemetry.io/collector/config/confignet"
 )
 
@@ -236,9 +236,10 @@ func (mcfg MetricsConfig) ToTranslatorOpts() []otlpmetrics.TranslatorOption {
 	case CumulativeMonotonicSumModeToDelta:
 		numberMode = otlpmetrics.NumberModeCumulativeToDelta
 	}
-	options = append(options, otlpmetrics.WithNumberMode(numberMode))
-	options = append(options, otlpmetrics.WithInitialCumulMonoValueMode(
-		otlpmetrics.InitialCumulMonoValueMode(mcfg.SumConfig.InitialCumulativeMonotonicMode)))
+	options = append(options,
+		otlpmetrics.WithNumberMode(numberMode),
+		otlpmetrics.WithInitialCumulMonoValueMode(
+			otlpmetrics.InitialCumulMonoValueMode(mcfg.SumConfig.InitialCumulativeMonotonicMode)))
 
 	return options
 }

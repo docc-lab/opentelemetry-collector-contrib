@@ -17,6 +17,7 @@ import (
 	conventions "go.opentelemetry.io/otel/semconv/v1.27.0"
 	"go.uber.org/zap"
 
+	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/encoding/awslogsencodingextension/internal/constants"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/golden"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/pdatatest/plogtest"
 )
@@ -36,7 +37,7 @@ func compressToGZIPReader(t *testing.T, buf []byte) io.Reader {
 
 // readAndCompressLogFile reads the data inside it, compresses it
 // and returns a GZIP reader for it.
-func readAndCompressLogFile(t *testing.T, dir string, file string) io.Reader {
+func readAndCompressLogFile(t *testing.T, dir, file string) io.Reader {
 	data, err := os.ReadFile(filepath.Join(dir, file))
 	require.NoError(t, err)
 	return compressToGZIPReader(t, data)
@@ -65,7 +66,7 @@ func TestUnmarshalLogs_PlainText(t *testing.T) {
 		},
 	}
 
-	u, err := NewVPCFlowLogUnmarshaler(fileFormatPlainText, component.BuildInfo{}, zap.NewNop())
+	u, err := NewVPCFlowLogUnmarshaler(constants.FileFormatPlainText, component.BuildInfo{}, zap.NewNop())
 	require.NoError(t, err)
 
 	for name, test := range tests {
@@ -78,7 +79,6 @@ func TestUnmarshalLogs_PlainText(t *testing.T) {
 			}
 
 			require.NoError(t, err)
-
 			expectedLogs, err := golden.ReadLogs(filepath.Join(dir, test.logsExpectedFilename))
 			require.NoError(t, err)
 			require.NoError(t, plogtest.CompareLogs(expectedLogs, logs))

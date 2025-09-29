@@ -95,7 +95,8 @@ func (gtr *gitlabTracesReceiver) processStageSpans(r ptrace.ResourceSpans, pipel
 }
 
 func (gtr *gitlabTracesReceiver) processJobSpans(r ptrace.ResourceSpans, p *glPipeline, traceID pcommon.TraceID, stages map[string]*glPipelineStage) error {
-	for _, job := range p.Builds {
+	for i := range p.Builds {
+		job := p.Builds[i]
 		jobEvent := glPipelineJob(job)
 
 		if job.FinishedAt != "" {
@@ -113,7 +114,7 @@ func (gtr *gitlabTracesReceiver) processJobSpans(r ptrace.ResourceSpans, p *glPi
 	return nil
 }
 
-func (gtr *gitlabTracesReceiver) createSpan(resourceSpans ptrace.ResourceSpans, e GitlabEvent, traceID pcommon.TraceID, spanID pcommon.SpanID) error {
+func (*gitlabTracesReceiver) createSpan(resourceSpans ptrace.ResourceSpans, e GitlabEvent, traceID pcommon.TraceID, spanID pcommon.SpanID) error {
 	scopeSpans := resourceSpans.ScopeSpans().AppendEmpty()
 	span := scopeSpans.Spans().AppendEmpty()
 
@@ -171,7 +172,7 @@ func newPipelineSpanID(pipelineID int, finishedAt string) (pcommon.SpanID, error
 
 // newStageSpanID creates a deterministic Stage Span ID based on the provided pipelineID, stageName, and stage startedAt time.
 // It's not possible to create the stageSpanID during a pipeline execution. Details can be found here: https://github.com/open-telemetry/semantic-conventions/issues/1749#issuecomment-2772544215
-func newStageSpanID(pipelineID int, stageName string, startedAt string) (pcommon.SpanID, error) {
+func newStageSpanID(pipelineID int, stageName, startedAt string) (pcommon.SpanID, error) {
 	if stageName == "" {
 		return pcommon.SpanID{}, errors.New("stageName is empty")
 	}
@@ -223,7 +224,8 @@ func newSpanID(input string) (pcommon.SpanID, error) {
 func (gtr *gitlabTracesReceiver) newStages(pipeline *glPipeline) (map[string]*glPipelineStage, error) {
 	stages := make(map[string]*glPipelineStage)
 
-	for _, job := range pipeline.Builds {
+	for i := range pipeline.Builds {
+		job := pipeline.Builds[i]
 		stage, exists := stages[job.Stage]
 		if !exists {
 			stage = &glPipelineStage{
@@ -243,7 +245,7 @@ func (gtr *gitlabTracesReceiver) newStages(pipeline *glPipeline) (map[string]*gl
 }
 
 // setStageTime determines stage start/finish times by finding the earliest start and latest finish time
-func (gtr *gitlabTracesReceiver) setStageTime(stage *glPipelineStage, job glPipelineJob) error {
+func (*gitlabTracesReceiver) setStageTime(stage *glPipelineStage, job glPipelineJob) error {
 	// Handle start time
 	if stage.StartedAt == "" {
 		stage.StartedAt = job.StartedAt
@@ -285,7 +287,7 @@ func (gtr *gitlabTracesReceiver) setStageTime(stage *glPipelineStage, job glPipe
 	return nil
 }
 
-func setSpanTimeStamps(span ptrace.Span, startTime string, endTime string) error {
+func setSpanTimeStamps(span ptrace.Span, startTime, endTime string) error {
 	parsedStartTime, err := parseGitlabTime(startTime)
 	if err != nil {
 		return err

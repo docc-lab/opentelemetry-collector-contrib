@@ -9,7 +9,7 @@ import (
 	"time"
 
 	pkgconfigmodel "github.com/DataDog/datadog-agent/pkg/config/model"
-	"github.com/DataDog/opentelemetry-mapping-go/pkg/otlp/attributes/source"
+	"github.com/DataDog/datadog-agent/pkg/opentelemetry-mapping-go/otlp/attributes/source"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/component/componentstatus"
@@ -38,7 +38,7 @@ type uuidProvider interface {
 type realUUIDProvider struct{}
 
 // NewString returns a new UUID string using the real uuid package.
-func (p *realUUIDProvider) NewString() string {
+func (*realUUIDProvider) NewString() string {
 	return uuid.New().String()
 }
 
@@ -167,17 +167,17 @@ func (e *datadogExtension) NotifyConfig(_ context.Context, conf *confmap.Conf) e
 }
 
 // Ready implements the extensioncapabilities.PipelineWatcher interface.
-func (e *datadogExtension) Ready() error {
+func (*datadogExtension) Ready() error {
 	return nil
 }
 
 // NotReady implements the extensioncapabilities.PipelineWatcher interface.
-func (e *datadogExtension) NotReady() error {
+func (*datadogExtension) NotReady() error {
 	return nil
 }
 
 // ComponentStatusChanged implements the componentstatus.Watcher interface.
-func (e *datadogExtension) ComponentStatusChanged(
+func (*datadogExtension) ComponentStatusChanged(
 	*componentstatus.InstanceID,
 	*componentstatus.Event,
 ) {

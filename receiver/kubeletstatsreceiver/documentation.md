@@ -198,10 +198,10 @@ Node network errors
 
 #### Attributes
 
-| Name | Description | Values |
-| ---- | ----------- | ------ |
-| interface | Name of the network interface. | Any Str |
-| direction | Direction of flow of bytes/operations (receive or transmit). | Str: ``receive``, ``transmit`` |
+| Name | Description | Values | Optional |
+| ---- | ----------- | ------ | -------- |
+| interface | Name of the network interface. | Any Str | false |
+| direction | Direction of flow of bytes/operations (receive or transmit). | Str: ``receive``, ``transmit`` | false |
 
 ### k8s.node.network.io
 
@@ -213,10 +213,10 @@ Node network IO
 
 #### Attributes
 
-| Name | Description | Values |
-| ---- | ----------- | ------ |
-| interface | Name of the network interface. | Any Str |
-| direction | Direction of flow of bytes/operations (receive or transmit). | Str: ``receive``, ``transmit`` |
+| Name | Description | Values | Optional |
+| ---- | ----------- | ------ | -------- |
+| interface | Name of the network interface. | Any Str | false |
+| direction | Direction of flow of bytes/operations (receive or transmit). | Str: ``receive``, ``transmit`` | false |
 
 ### k8s.pod.cpu.time
 
@@ -316,10 +316,10 @@ Pod network errors
 
 #### Attributes
 
-| Name | Description | Values |
-| ---- | ----------- | ------ |
-| interface | Name of the network interface. | Any Str |
-| direction | Direction of flow of bytes/operations (receive or transmit). | Str: ``receive``, ``transmit`` |
+| Name | Description | Values | Optional |
+| ---- | ----------- | ------ | -------- |
+| interface | Name of the network interface. | Any Str | false |
+| direction | Direction of flow of bytes/operations (receive or transmit). | Str: ``receive``, ``transmit`` | false |
 
 ### k8s.pod.network.io
 
@@ -331,10 +331,10 @@ Pod network IO
 
 #### Attributes
 
-| Name | Description | Values |
-| ---- | ----------- | ------ |
-| interface | Name of the network interface. | Any Str |
-| direction | Direction of flow of bytes/operations (receive or transmit). | Str: ``receive``, ``transmit`` |
+| Name | Description | Values | Optional |
+| ---- | ----------- | ------ | -------- |
+| interface | Name of the network interface. | Any Str | false |
+| direction | Direction of flow of bytes/operations (receive or transmit). | Str: ``receive``, ``transmit`` | false |
 
 ### k8s.volume.available
 
@@ -385,14 +385,6 @@ metrics:
   <metric_name>:
     enabled: true
 ```
-
-### container.cpu.utilization
-
-Container CPU utilization
-
-| Unit | Metric Type | Value Type |
-| ---- | ----------- | ---------- |
-| 1 | Gauge | Double |
 
 ### container.uptime
 
@@ -450,14 +442,6 @@ Container memory utilization as a ratio of the container's requests
 | ---- | ----------- | ---------- |
 | 1 | Gauge | Double |
 
-### k8s.node.cpu.utilization
-
-Node CPU utilization
-
-| Unit | Metric Type | Value Type |
-| ---- | ----------- | ---------- |
-| 1 | Gauge | Double |
-
 ### k8s.node.uptime
 
 The time since the node started
@@ -469,14 +453,6 @@ The time since the node started
 ### k8s.pod.cpu.node.utilization
 
 Pod cpu utilization as a ratio of the node's capacity
-
-| Unit | Metric Type | Value Type |
-| ---- | ----------- | ---------- |
-| 1 | Gauge | Double |
-
-### k8s.pod.cpu.utilization
-
-Pod CPU utilization
 
 | Unit | Metric Type | Value Type |
 | ---- | ----------- | ---------- |
@@ -529,6 +505,14 @@ The time since the pod started
 | Unit | Metric Type | Value Type | Aggregation Temporality | Monotonic |
 | ---- | ----------- | ---------- | ----------------------- | --------- |
 | s | Sum | Int | Cumulative | true |
+
+### k8s.pod.volume.usage
+
+The number of used bytes in the pod volume.
+
+| Unit | Metric Type | Value Type | Aggregation Temporality | Monotonic |
+| ---- | ----------- | ---------- | ----------------------- | --------- |
+| By | Sum | Int | Cumulative | false |
 
 ## Resource Attributes
 
