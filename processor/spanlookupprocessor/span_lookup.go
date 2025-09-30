@@ -72,9 +72,9 @@ func (p *spanLookupProcessor) start(ctx context.Context, host component.Host) er
 		}
 	}()
 
-	// Start the span export worker
-	p.workerWg.Add(1)
-	go p.exportNewSpansWorker()
+	// Start the span export worker (disabled for now - only export on-demand)
+	// p.workerWg.Add(1)
+	// go p.exportNewSpansWorker()
 
 	return nil
 }
@@ -178,12 +178,34 @@ func (p *spanLookupProcessor) processTraces(ctx context.Context, td ptrace.Trace
 				zap.String("span_kind", span.Kind().String()),
 				zap.String("parent_span_id", span.ParentSpanID().String()))
 		}
+
+		// Create new traces with found spans and forward them to next processor
+		outputTraces := ptrace.NewTraces()
+		for i, span := range foundSpans {
+			resource := foundResources[i]
+			scope := foundScopes[i]
+
+			// Create new resource spans
+			outputResourceSpans := outputTraces.ResourceSpans().AppendEmpty()
+			resource.Resource().Attributes().CopyTo(outputResourceSpans.Resource().Attributes())
+
+			// Create new scope spans
+			outputScopeSpans := outputResourceSpans.ScopeSpans().AppendEmpty()
+			scope.Scope().CopyTo(outputScopeSpans.Scope())
+
+			// Create new span
+			outputSpan := outputScopeSpans.Spans().AppendEmpty()
+			span.CopyTo(outputSpan)
+		}
+
+		p.logger.Info("Forwarding found spans to next processor",
+			zap.Int("span_count", len(foundSpans)))
+		return outputTraces, nil
 	} else {
 		p.logger.Debug("No upstream server-side spans found in reconstruction processor for lookup request")
+		// Return empty traces since we've processed them
+		return ptrace.NewTraces(), nil
 	}
-
-	// Return empty traces since we've processed them
-	return ptrace.NewTraces(), nil
 }
 
 // exportNewSpansWorker continuously exports new spans from ClosedSpans

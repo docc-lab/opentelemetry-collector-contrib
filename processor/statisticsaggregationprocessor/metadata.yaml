@@ -1,0 +1,12 @@
+type: statisticsaggregation
+
+status:
+  class: processor
+  stability:
+    development: [traces]
+  codeowners:
+    active: [tomislav]
+
+tests:
+  config:
+    export_window: 60s

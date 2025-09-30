@@ -43,6 +43,10 @@ processors:
   lookuprouting:
     # Configuration options for lookup routing functionality
     # Add configuration fields here as needed
+  
+  # Statistics Aggregation Processor for aggregating statistics about processed spans
+  statisticsaggregation:
+    export_window: 60s
 
 exporters:
   # Debug exporter for development and testing
@@ -77,7 +81,7 @@ service:
     # Pipeline 2: Span Lookup and Response
     traces/lookup:
       receivers: [agentcontact]
-      processors: [spanlookup, lookuprouting]
+      processors: [spanlookup, lookuprouting, statisticsaggregation]
       exporters: [otlp, debug]
     
     # Pipeline 3: IP Discovery Service
