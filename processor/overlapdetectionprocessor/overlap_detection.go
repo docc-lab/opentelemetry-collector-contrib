@@ -128,6 +128,8 @@ func (o *overlapDetectionProcessor) workerLoop() {
 			return
 		default:
 			o.processSpanBuffer()
+			// Add small delay between worker loop iterations to reduce CPU usage
+			time.Sleep(1 * time.Millisecond)
 		}
 	}
 }

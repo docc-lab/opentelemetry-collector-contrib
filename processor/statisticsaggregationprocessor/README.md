@@ -28,6 +28,225 @@ The processor should be placed after the Lookup Routing Processor in the pipelin
 ```yaml
 service:
   pipelines:
-    traces:
-      processors: [lookuprouting, statisticsaggregation]
+    traces/lookup:
+      receivers: [agentcontact]
+      processors: [spanlookup, lookuprouting, statisticsaggregation]
+      exporters: [otlp]
 ```
+
+## Overview
+
+The Statistics Aggregation Processor is designed to:
+- Aggregate statistics about processed spans from the lookup pipeline
+- Track "Victims" and "Survivors" counters for different features
+- Use configurable feature extraction functions to identify span characteristics
+- Provide real-time statistics logging and periodic export functionality
+- Support swappable feature extraction strategies for different analysis needs
+
+## Feature Extraction
+
+The processor supports multiple feature extraction strategies:
+
+### Service-Based Feature Extraction (Default)
+Extracts features based on service name from resource attributes:
+```go
+func ServiceBasedFeatureExtractor(span ptrace.Span, resource ptrace.ResourceSpans) FeatureExtractionResult {
+    // Extracts service.name from resource attributes
+    // Returns service name as feature key
+}
+```
+
+### Trace ID-Based Feature Extraction
+Extracts features based on trace ID:
+```go
+func TraceIDBasedFeatureExtractor(span ptrace.Span, resource ptrace.ResourceSpans) FeatureExtractionResult {
+    // Uses trace ID as feature key
+    // Useful for trace-level analysis
+}
+```
+
+### Upstream IP-Based Feature Extraction
+Extracts features based on upstream IP address:
+```go
+func UpstreamIPBasedFeatureExtractor(span ptrace.Span, resource ptrace.ResourceSpans) FeatureExtractionResult {
+    // Extracts upstream.ip from span attributes
+    // Useful for network-level analysis
+}
+```
+
+## Statistics Tracking
+
+The processor maintains statistics for each feature:
+
+- **Victims**: Count of spans that represent problematic cases
+- **Survivors**: Count of spans that represent normal cases (currently unused)
+- **Feature Key**: String identifier for the feature (e.g., service name, trace ID)
+
+## Behavior
+
+### Processing Flow
+
+1. **Span Collection**: Collects spans from incoming traces
+2. **Feature Extraction**: Uses configured feature extractor to identify features
+3. **Counter Increment**: Increments victim counter for each span
+4. **Statistics Logging**: Logs current statistics every second
+5. **Periodic Export**: Exports aggregated statistics based on export window
+
+### Real-Time Monitoring
+
+- **Per-Second Logging**: Logs current statistics every second
+- **Feature Breakdown**: Shows victim counts per feature
+- **Total Statistics**: Displays overall victim and survivor counts
+- **Processing Status**: Reports processing status and span counts
+
+## Performance Considerations
+
+- **Asynchronous Processing**: Uses worker loop with event buffer
+- **CPU Throttling**: 1ms sleep in worker loop prevents busy waiting
+- **Memory Efficient**: Minimal memory footprint with configurable limits
+- **Thread Safety**: Thread-safe operations with proper mutex protection
+
+## Limitations
+
+- **Victim-Only Counting**: Currently only increments victim counters
+- **Single Feature**: Processes one feature per span
+- **Memory Growth**: Statistics map grows with unique features
+- **No Persistence**: Statistics are lost on restart
+
+## Troubleshooting
+
+### Common Issues
+
+1. **High victim counts**: Check if spans are being processed correctly
+2. **Missing statistics**: Verify feature extraction function is working
+3. **Memory usage**: Monitor statistics map size for unique features
+
+### Debug Logging
+
+Enable debug logging to see detailed processing:
+
+```yaml
+service:
+  telemetry:
+    logs:
+      level: debug
+```
+
+---
+
+## Technical Documentation
+
+### Component Architecture
+
+The Statistics Aggregation Processor implements a sophisticated statistics collection system with swappable feature extraction and real-time monitoring. Key architectural components:
+
+- **Event Buffer**: Thread-safe queue for incoming span events with context preservation
+- **Feature Extraction**: Swappable functions for extracting features from spans
+- **Statistics Tracking**: Maps feature keys to victim/survivor counters
+- **Worker Loop**: Asynchronous processing with CPU throttling (1ms sleep)
+- **Real-Time Logging**: Per-second statistics logging with detailed breakdowns
+
+### Statistics Data Structures
+
+**FeatureCounters**:
+- `Victims`: Count of problematic spans for this feature
+- `Survivors`: Count of normal spans for this feature (currently unused)
+- `LastUpdated`: Timestamp of last counter update
+
+**StatisticsMap**:
+- `FeatureCounters`: Map of feature key -> counter data
+- `TotalVictims`: Overall victim count across all features
+- `TotalSurvivors`: Overall survivor count across all features
+- `LastExport`: Timestamp of last statistics export
+
+### Feature Extraction System
+
+**FeatureExtractor Interface**:
+```go
+type FeatureExtractor func(span ptrace.Span, resource ptrace.ResourceSpans) FeatureExtractionResult
+```
+
+**FeatureExtractionResult**:
+- `FeatureKey`: String identifier for the feature
+- `IsVictim`: Boolean indicating if span is a victim
+- `IsSurvivor`: Boolean indicating if span is a survivor
+- `Metadata`: Additional metadata for the feature
+
+### Processing Pipeline
+
+1. **Span Collection**: Collects spans with resource and scope context
+2. **Buffer Management**: Adds spans to thread-safe event buffer
+3. **Worker Processing**: Asynchronous worker processes buffered spans
+4. **Feature Extraction**: Uses configured extractor to identify features
+5. **Counter Updates**: Increments appropriate counters based on extraction results
+6. **Statistics Logging**: Logs current statistics every second
+
+### Thread Safety Implementation
+
+- **Event Buffer**: `sync.Mutex` protects span buffer operations
+- **Statistics Map**: `sync.RWMutex` protects statistics collections
+- **Concurrent Access**: Read locks for statistics access, write locks for updates
+- **Worker Management**: Proper wait group management for worker goroutines
+
+### Performance Optimizations
+
+- **CPU Throttling**: 1ms sleep in worker loop prevents busy waiting
+- **Batch Processing**: Processes all queued spans in single iteration
+- **Memory Efficiency**: Minimal memory footprint with efficient data structures
+- **Async Operations**: Non-blocking span processing with worker goroutines
+
+### Integration Points
+
+- **Lookup Routing Processor**: Receives looked-up spans for statistics
+- **Feature Extractors**: Swappable functions for different analysis strategies
+- **OpenTelemetry Pipeline**: Standard processor interface with trace consumer
+- **Logging System**: Comprehensive logging for monitoring and debugging
+
+### Configuration Options
+
+- **`export_window`**: Time window for statistics export (default: 60s)
+- **Feature Extractor**: Configurable function for feature identification
+- **Logging Interval**: Per-second statistics logging (hardcoded)
+
+### Error Handling & Resilience
+
+- **Invalid Spans**: Graceful handling of spans without required attributes
+- **Feature Extraction Errors**: Robust handling of extraction failures
+- **Memory Management**: Efficient cleanup of processed spans
+- **Worker Management**: Proper shutdown of worker goroutines
+
+### Monitoring & Observability
+
+- **Real-Time Logging**: Per-second statistics logging with detailed breakdowns
+- **Feature Breakdown**: Individual feature statistics with victim counts
+- **Processing Metrics**: Span processing counts and timing
+- **Error Reporting**: Detailed error logging with context
+
+### Key Data Structures
+
+**SpanWithResource**:
+- `Span`: Original span with attributes
+- `Resource`: Resource context for attribute access
+- `Scope`: Scope context for span processing
+
+**StatisticsMap**:
+- `FeatureCounters`: Map of feature key -> counter data
+- `TotalVictims`/`TotalSurvivors`: Overall statistics
+- `LastExport`: Export timestamp tracking
+
+### Feature Extraction Examples
+
+**Service-Based Extraction**:
+- Extracts `service.name` from resource attributes
+- Uses service name as feature key
+- Default strategy for service-level analysis
+
+**Trace ID-Based Extraction**:
+- Uses trace ID as feature key
+- Useful for trace-level analysis
+- Provides trace-specific statistics
+
+**Upstream IP-Based Extraction**:
+- Extracts `upstream.ip` from span attributes
+- Useful for network-level analysis
+- Provides IP-specific statistics

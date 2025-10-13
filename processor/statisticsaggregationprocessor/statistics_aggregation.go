@@ -169,6 +169,8 @@ func (sap *statisticsAggregationProcessor) workerLoop() {
 			return
 		default:
 			sap.processSpanBuffer()
+			// Add small delay between worker loop iterations to reduce CPU usage
+			time.Sleep(1 * time.Millisecond)
 		}
 	}
 }

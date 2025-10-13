@@ -289,6 +289,8 @@ func (sp *segmentationProcessor) workerLoop() {
 			return
 		default:
 			sp.processEventBuffer()
+			// Add small delay between worker loop iterations to reduce CPU usage
+			time.Sleep(1 * time.Millisecond)
 		}
 	}
 }

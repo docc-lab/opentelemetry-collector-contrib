@@ -467,3 +467,83 @@ flowchart LR
 - **Low Latency**: Sub-millisecond event processing
 - **Scalable Design**: Configurable limits and TTL
 - **Resilient Operations**: Graceful handling of missing events
+
+---
+
+## Technical Documentation
+
+### Component Architecture
+
+The Span Reconstruction Processor implements a sophisticated event-driven span reconstruction system with dual collection management and server-centric eviction policies. Key architectural components:
+
+- **Event Buffer**: Thread-safe queue for incoming span events with context preservation
+- **Dual Span Collections**: Separate `openSpans` and `closedSpans` maps for optimal memory management
+- **Parent-Child Tracking**: Server-client relationship mapping for cascading eviction
+- **Worker Loop**: Asynchronous processing with CPU throttling (1ms sleep)
+- **Global Access**: Singleton pattern for cross-processor communication
+
+### Event Processing Pipeline
+
+The processor handles four distinct event types with specialized processing logic:
+
+1. **Span Start Events**: Creates new `reconstructedSpan` objects in `openSpans`
+2. **Span End Events**: Moves spans from `openSpans` to `closedSpans` 
+3. **Log Events**: Appends events to existing open spans
+4. **Complete Spans**: Pass-through processing without internal storage
+
+### Memory Management Strategy
+
+**Server-Centric Eviction Policy**:
+- Prioritizes server spans over client spans
+- Cascading eviction removes parent-child relationships
+- TTL-based cleanup removes expired spans
+- Configurable limits prevent memory exhaustion
+
+**Dual Collection Benefits**:
+- `openSpans`: Active spans receiving events (lower eviction priority)
+- `closedSpans`: Completed spans ready for output (higher eviction priority)
+- Optimized memory usage through targeted eviction
+
+### Thread Safety Implementation
+
+- **Read-Write Mutex**: `spansMutex` protects all span collections
+- **Concurrent Access**: Shared locks for read operations, exclusive locks for writes
+- **Async Operations**: Non-blocking eviction and cleanup in separate goroutines
+- **Queue Management**: Thread-safe event buffer with mutex protection
+
+### Performance Optimizations
+
+- **CPU Throttling**: 1ms sleep in worker loop prevents busy waiting
+- **Batch Processing**: Processes all queued events in single iteration
+- **Memory Efficiency**: Pre-allocated slices and optimized data structures
+- **Async Operations**: Non-blocking eviction and cleanup operations
+
+### Integration Points
+
+- **Global Access**: `GlobalSpanReconstructionProcessor` singleton for cross-processor access
+- **Span Lookup**: Provides reconstructed spans for lookup operations
+- **Segmentation**: Feeds completed spans to segmentation processor
+- **OpenTelemetry Pipeline**: Standard processor interface with trace consumer
+
+### Configuration Options
+
+- **`max_active_spans`**: Memory limit for active spans (default: 1000)
+- **`span_ttl`**: Time-to-live for span cleanup (default: 1h)
+- **`enable_metrics`**: Internal metrics collection (default: false)
+- **`enable_node_and_edge`**: Advanced deconstruction features (default: false)
+- **`strict_parent_child_validation`**: Enhanced relationship validation (default: false)
+- **`emit_immediately`**: Immediate vs. batched output (default: false)
+
+### Error Handling & Resilience
+
+- **Missing Events**: Graceful handling with warning logs
+- **Memory Pressure**: Server-centric eviction with cascading cleanup
+- **Invalid Data**: Robust parsing with fallback values
+- **Concurrent Access**: Thread-safe operations prevent race conditions
+
+### Monitoring & Observability
+
+- **Comprehensive Logging**: Debug-level logging for event processing
+- **Metrics Support**: Optional internal metrics collection
+- **Performance Tracking**: Processing time and memory usage monitoring
+- **Error Reporting**: Detailed error logging with context

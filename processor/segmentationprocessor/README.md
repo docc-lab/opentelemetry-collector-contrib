@@ -86,3 +86,112 @@ The processor adds segment information as span attributes. The structure of the 
 - Skips spans shorter than the configured threshold
 - Limited by the maximum segments per span configuration
 
+---
+
+## Technical Documentation
+
+### Component Architecture
+
+The Segmentation Processor implements a sophisticated span segmentation system with server-centric span management, change detection, and time-based segment analysis. Key architectural components:
+
+- **Server Span Management**: Tracks server spans with their associated client children
+- **Event Buffer**: Thread-safe queue for incoming span events with context preservation
+- **Change Detection**: HDR Histogram-based percentile change detection system
+- **Worker Loop**: Asynchronous processing with CPU throttling (1ms sleep)
+- **Segment Analysis**: Time-based segmentation with configurable duration thresholds
+
+### Segmentation Algorithm
+
+The processor implements a multi-stage segmentation process:
+
+1. **Server Span Identification**: Identifies server-side spans and tracks their client children
+2. **Parent-Child Resolution**: Resolves parent-child relationships between server and client spans
+3. **Segment Creation**: Creates time-based segments within server spans
+4. **Change Detection**: Analyzes segment patterns using HDR Histogram percentiles
+5. **Bad Segment Marking**: Marks segments as "bad" based on change detection results
+
+### Server-Centric Span Management
+
+**Server Span Tracking**:
+- Maintains `serverSpans` map with server span key -> `ServerSpan` object
+- Tracks `ChildSpans` array for each server span
+- Implements `FirstSeen` timestamp for eviction policies
+- Uses `parentToChildren` mapping for relationship tracking
+
+**Client Span Handling**:
+- Stores client spans in `clientSpans` map when parent not yet available
+- Resolves parent-child relationships when server spans arrive
+- Implements cascading eviction (evicting server span removes children)
+
+### Change Detection System
+
+**HDR Histogram Implementation**:
+- Uses `hdrhistogram-go` for high-precision latency distribution tracking
+- Tracks `SegmentDistribution` with histogram, count, sum, and last update time
+- Configurable percentile thresholds (default: P99)
+- Minimum sample requirements before change detection
+
+**Change Detection Process**:
+1. **Sample Collection**: Accumulates latency samples for each segment type
+2. **Percentile Analysis**: Calculates percentile thresholds from historical data
+3. **Change Identification**: Compares current samples against percentile thresholds
+4. **Confidence Scoring**: Provides confidence levels for change detection results
+
+### Thread Safety Implementation
+
+- **Read-Write Mutex**: `spansMutex` protects all span collections and maps
+- **Concurrent Access**: Shared locks for read operations, exclusive locks for writes
+- **Race Condition Prevention**: Fixed concurrent map access issues in `handleClientSpan`
+- **Async Operations**: Non-blocking processing in separate goroutines
+
+### Performance Optimizations
+
+- **CPU Throttling**: 1ms sleep in worker loop prevents busy waiting
+- **Batch Processing**: Processes all queued events in single iteration
+- **Memory Efficiency**: Server-centric eviction reduces memory fragmentation
+- **HDR Histogram**: Efficient percentile calculations with minimal memory overhead
+
+### Integration Points
+
+- **Span Reconstruction Processor**: Receives completed spans for segmentation
+- **Overlap Detection Processor**: Feeds segmented spans for overlap analysis
+- **Statistics Aggregation**: Provides segment data for statistical analysis
+- **OpenTelemetry Pipeline**: Standard processor interface with trace consumer
+
+### Configuration Options
+
+- **`segment_duration`**: Duration threshold for segment creation (default: 1 minute)
+- **`enable_metrics`**: Internal metrics collection (default: false)
+- **`change_detection_percentile`**: Percentile threshold for change detection (default: 0.99)
+- **`min_samples`**: Minimum samples before change detection (default: 100)
+
+### Error Handling & Resilience
+
+- **Missing Relationships**: Graceful handling of missing parent-child relationships
+- **Memory Pressure**: Server-centric eviction with cascading cleanup
+- **Invalid Data**: Robust parsing with fallback values
+- **Race Conditions**: Comprehensive mutex protection prevents concurrent access issues
+
+### Monitoring & Observability
+
+- **Comprehensive Logging**: Debug-level logging for segmentation operations
+- **Change Detection Metrics**: Detailed logging of change detection results
+- **Performance Tracking**: Processing time and memory usage monitoring
+- **Error Reporting**: Detailed error logging with context
+
+### Key Data Structures
+
+**ServerSpan**:
+- `Span`: Original span with resource and scope context
+- `ChildSpans`: Array of associated client spans
+- `FirstSeen`: Timestamp for eviction policies
+
+**Segment**:
+- `ServiceOperation`: Service name + operation name
+- `StartEndpoint`/`EndEndpoint`: Segment boundary points
+- `StartTime`/`EndTime`: Temporal boundaries
+
+**SegmentDistribution**:
+- `histogram`: HDR Histogram for latency tracking
+- `count`/`sum`: Statistical aggregations
+- `lastUpdate`: Timestamp for freshness tracking

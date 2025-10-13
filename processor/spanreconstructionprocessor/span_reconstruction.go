@@ -372,6 +372,8 @@ func (p *SpanReconstructionProcessor) workerLoop() {
 			p.processEventBuffer()
 			// Output completed spans independently
 			p.outputCompletedSpans()
+			// Add small delay between worker loop iterations to reduce CPU usage
+			time.Sleep(1 * time.Millisecond)
 		}
 	}
 }
