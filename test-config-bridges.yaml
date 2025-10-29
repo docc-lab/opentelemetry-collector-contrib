@@ -1,0 +1,52 @@
+receivers:
+  # High priority OTLP receiver
+  otlp/highprio:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+  
+  # Low priority OTLP receiver
+  otlp/lowprio:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4319
+      http:
+        endpoint: 0.0.0.0:4320
+
+processors:
+  # No custom processors needed for priority-based routing
+
+exporters:
+  # Debug exporter for development and testing
+  debug:
+    verbosity: detailed
+  
+  # OTLP exporter for sending processed spans to downstream systems
+  otlp:
+    endpoint: "http://localhost:4317"
+    tls:
+      insecure: true
+
+service:
+  telemetry:
+    logs:
+      level: DEBUG
+  
+  # Priority-based pipelines
+  pipelines:
+    # High priority pipeline - receives from port 4317/4318
+    traces/highprio:
+      receivers: [otlp/highprio]
+      processors: []
+      exporters: [otlp, debug]
+    
+    # Low priority pipeline - receives from port 4319/4320
+    traces/lowprio:
+      receivers: [otlp/lowprio]
+      processors: []
+      exporters: [otlp, debug]
+  
+  # Extensions for additional functionality
+  extensions: []
