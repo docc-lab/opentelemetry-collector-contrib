@@ -6,13 +6,14 @@ package priorityprocessor
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/consumer/consumertest"
 	"go.opentelemetry.io/collector/pdata/ptrace"
-	"go.opentelemetry.io/collector/processor"
+	"go.opentelemetry.io/collector/processor/processortest"
 	"go.uber.org/zap"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/processor/priorityprocessor/internal/metadata"
@@ -36,12 +37,10 @@ func TestCreateDefaultConfig(t *testing.T) {
 func TestCreateTracesProcessor(t *testing.T) {
 	factory := NewFactory()
 	cfg := factory.CreateDefaultConfig()
-	host := component.NewAssertNoErrorHost(t)
+	host := processortest.NewNopHost()
 
-	set := processor.CreateSettings{
-		TelemetrySettings: component.TelemetrySettings{},
-		ID:                component.MustNewID("priority"),
-	}
+	set := processortest.NewNopCreateSettings()
+	set.ID = component.MustNewID("priority")
 
 	tracesProcessor, err := factory.CreateTracesProcessor(
 		context.Background(),
@@ -52,53 +51,90 @@ func TestCreateTracesProcessor(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.NotNil(t, tracesProcessor)
+
+	// Start processor
+	err = tracesProcessor.Start(context.Background(), host)
+	require.NoError(t, err)
+
+	// Shutdown processor
+	err = tracesProcessor.Shutdown(context.Background())
+	require.NoError(t, err)
 }
 
 func TestConsumeTraces(t *testing.T) {
-	cfg := &Config{}
+	cfg := &Config{
+		MemoryLimitPercentage:      50,
+		BurstMemoryLimitPercentage: 80,
+		CheckInterval:              200 * time.Millisecond,
+	}
 	nextConsumer := consumertest.NewNop()
 	logger := zap.NewNop()
 
-	processor := newProcessor(cfg, logger, nextConsumer)
+	processor, err := newProcessor(cfg, logger, nextConsumer)
+	require.NoError(t, err)
 
 	td := ptrace.NewTraces()
-	err := processor.ConsumeTraces(context.Background(), td)
+	err = processor.ConsumeTraces(context.Background(), td)
 
 	assert.NoError(t, err)
+
+	err = processor.Shutdown(context.Background())
+	require.NoError(t, err)
 }
 
 func TestStart(t *testing.T) {
-	cfg := &Config{}
+	cfg := &Config{
+		MemoryLimitPercentage:      50,
+		BurstMemoryLimitPercentage: 80,
+		CheckInterval:              200 * time.Millisecond,
+	}
 	nextConsumer := consumertest.NewNop()
 	logger := zap.NewNop()
 
-	processor := newProcessor(cfg, logger, nextConsumer)
+	processor, err := newProcessor(cfg, logger, nextConsumer)
+	require.NoError(t, err)
 
-	host := component.NewAssertNoErrorHost(t)
-	err := processor.Start(context.Background(), host)
+	host := processortest.NewNopHost()
+	err = processor.Start(context.Background(), host)
 
-	assert.NoError(t, err)
+	require.NoError(t, err)
+
+	err = processor.Shutdown(context.Background())
+	require.NoError(t, err)
 }
 
 func TestShutdown(t *testing.T) {
-	cfg := &Config{}
+	cfg := &Config{
+		MemoryLimitPercentage:      50,
+		BurstMemoryLimitPercentage: 80,
+		CheckInterval:              200 * time.Millisecond,
+	}
 	nextConsumer := consumertest.NewNop()
 	logger := zap.NewNop()
 
-	processor := newProcessor(cfg, logger, nextConsumer)
+	processor, err := newProcessor(cfg, logger, nextConsumer)
+	require.NoError(t, err)
 
-	err := processor.Shutdown(context.Background())
+	err = processor.Shutdown(context.Background())
 
 	assert.NoError(t, err)
 }
 
 func TestCapabilities(t *testing.T) {
-	cfg := &Config{}
+	cfg := &Config{
+		MemoryLimitPercentage:      50,
+		BurstMemoryLimitPercentage: 80,
+		CheckInterval:              200 * time.Millisecond,
+	}
 	nextConsumer := consumertest.NewNop()
 	logger := zap.NewNop()
 
-	processor := newProcessor(cfg, logger, nextConsumer)
+	processor, err := newProcessor(cfg, logger, nextConsumer)
+	require.NoError(t, err)
 
 	caps := processor.Capabilities()
 	assert.True(t, caps.MutatesData)
+
+	err = processor.Shutdown(context.Background())
+	require.NoError(t, err)
 }

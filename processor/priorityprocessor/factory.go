@@ -7,10 +7,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/consumer"
 	"go.opentelemetry.io/collector/processor"
+	"go.opentelemetry.io/collector/processor/processorhelper"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/processor/priorityprocessor/internal/metadata"
 )
@@ -24,11 +26,15 @@ func NewFactory() processor.Factory {
 }
 
 func createDefaultConfig() component.Config {
-	return &Config{}
+	return &Config{
+		MemoryLimitPercentage:      50,
+		BurstMemoryLimitPercentage: 80,
+		CheckInterval:              200 * time.Millisecond,
+	}
 }
 
 func createTracesProcessor(
-	_ context.Context,
+	ctx context.Context,
 	set processor.Settings,
 	cfg component.Config,
 	nextConsumer consumer.Traces,
@@ -42,5 +48,19 @@ func createTracesProcessor(
 		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
 
-	return newProcessor(processorConfig, set.Logger, nextConsumer), nil
+	proc, err := newProcessor(processorConfig, set.Logger, nextConsumer)
+	if err != nil {
+		return nil, err
+	}
+
+	return processorhelper.NewTraces(
+		ctx,
+		set,
+		cfg,
+		nextConsumer,
+		proc.processTraces,
+		processorhelper.WithCapabilities(consumer.Capabilities{MutatesData: true}),
+		processorhelper.WithStart(proc.start),
+		processorhelper.WithShutdown(proc.shutdown),
+	)
 }
