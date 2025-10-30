@@ -6,15 +6,13 @@ package priorityprocessor
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/collector/component"
+	"go.opentelemetry.io/collector/component/componenttest"
 	"go.opentelemetry.io/collector/consumer/consumertest"
 	"go.opentelemetry.io/collector/pdata/ptrace"
 	"go.opentelemetry.io/collector/processor/processortest"
-	"go.uber.org/zap"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/processor/priorityprocessor/internal/metadata"
 )
@@ -37,12 +35,10 @@ func TestCreateDefaultConfig(t *testing.T) {
 func TestCreateTracesProcessor(t *testing.T) {
 	factory := NewFactory()
 	cfg := factory.CreateDefaultConfig()
-	host := processortest.NewNopHost()
 
-	set := processortest.NewNopCreateSettings()
-	set.ID = component.MustNewID("priority")
+	set := processortest.NewNopSettings(metadata.Type)
 
-	tracesProcessor, err := factory.CreateTracesProcessor(
+	tracesProcessor, err := factory.CreateTraces(
 		context.Background(),
 		set,
 		cfg,
@@ -53,6 +49,7 @@ func TestCreateTracesProcessor(t *testing.T) {
 	assert.NotNil(t, tracesProcessor)
 
 	// Start processor
+	host := componenttest.NewNopHost()
 	err = tracesProcessor.Start(context.Background(), host)
 	require.NoError(t, err)
 
@@ -62,79 +59,87 @@ func TestCreateTracesProcessor(t *testing.T) {
 }
 
 func TestConsumeTraces(t *testing.T) {
-	cfg := &Config{
-		MemoryLimitPercentage:      50,
-		BurstMemoryLimitPercentage: 80,
-		CheckInterval:              200 * time.Millisecond,
-	}
-	nextConsumer := consumertest.NewNop()
-	logger := zap.NewNop()
+	factory := NewFactory()
+	cfg := factory.CreateDefaultConfig()
+	set := processortest.NewNopSettings(metadata.Type)
 
-	processor, err := newProcessor(cfg, logger, nextConsumer)
+	tracesProcessor, err := factory.CreateTraces(
+		context.Background(),
+		set,
+		cfg,
+		consumertest.NewNop(),
+	)
+	require.NoError(t, err)
+
+	host := componenttest.NewNopHost()
+	err = tracesProcessor.Start(context.Background(), host)
 	require.NoError(t, err)
 
 	td := ptrace.NewTraces()
-	err = processor.ConsumeTraces(context.Background(), td)
+	err = tracesProcessor.ConsumeTraces(context.Background(), td)
 
 	assert.NoError(t, err)
 
-	err = processor.Shutdown(context.Background())
+	err = tracesProcessor.Shutdown(context.Background())
 	require.NoError(t, err)
 }
 
 func TestStart(t *testing.T) {
-	cfg := &Config{
-		MemoryLimitPercentage:      50,
-		BurstMemoryLimitPercentage: 80,
-		CheckInterval:              200 * time.Millisecond,
-	}
-	nextConsumer := consumertest.NewNop()
-	logger := zap.NewNop()
+	factory := NewFactory()
+	cfg := factory.CreateDefaultConfig()
+	set := processortest.NewNopSettings(metadata.Type)
 
-	processor, err := newProcessor(cfg, logger, nextConsumer)
+	tracesProcessor, err := factory.CreateTraces(
+		context.Background(),
+		set,
+		cfg,
+		consumertest.NewNop(),
+	)
 	require.NoError(t, err)
 
-	host := processortest.NewNopHost()
-	err = processor.Start(context.Background(), host)
+	host := componenttest.NewNopHost()
+	err = tracesProcessor.Start(context.Background(), host)
 
 	require.NoError(t, err)
 
-	err = processor.Shutdown(context.Background())
+	err = tracesProcessor.Shutdown(context.Background())
 	require.NoError(t, err)
 }
 
 func TestShutdown(t *testing.T) {
-	cfg := &Config{
-		MemoryLimitPercentage:      50,
-		BurstMemoryLimitPercentage: 80,
-		CheckInterval:              200 * time.Millisecond,
-	}
-	nextConsumer := consumertest.NewNop()
-	logger := zap.NewNop()
+	factory := NewFactory()
+	cfg := factory.CreateDefaultConfig()
+	set := processortest.NewNopSettings(metadata.Type)
 
-	processor, err := newProcessor(cfg, logger, nextConsumer)
+	tracesProcessor, err := factory.CreateTraces(
+		context.Background(),
+		set,
+		cfg,
+		consumertest.NewNop(),
+	)
 	require.NoError(t, err)
 
-	err = processor.Shutdown(context.Background())
+	err = tracesProcessor.Shutdown(context.Background())
 
 	assert.NoError(t, err)
 }
 
 func TestCapabilities(t *testing.T) {
-	cfg := &Config{
-		MemoryLimitPercentage:      50,
-		BurstMemoryLimitPercentage: 80,
-		CheckInterval:              200 * time.Millisecond,
-	}
-	nextConsumer := consumertest.NewNop()
-	logger := zap.NewNop()
+	factory := NewFactory()
+	cfg := factory.CreateDefaultConfig()
+	set := processortest.NewNopSettings(metadata.Type)
 
-	processor, err := newProcessor(cfg, logger, nextConsumer)
+	tracesProcessor, err := factory.CreateTraces(
+		context.Background(),
+		set,
+		cfg,
+		consumertest.NewNop(),
+	)
 	require.NoError(t, err)
 
-	caps := processor.Capabilities()
+	caps := tracesProcessor.Capabilities()
 	assert.True(t, caps.MutatesData)
 
-	err = processor.Shutdown(context.Background())
+	err = tracesProcessor.Shutdown(context.Background())
 	require.NoError(t, err)
 }

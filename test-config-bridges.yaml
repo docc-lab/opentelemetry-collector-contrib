@@ -7,16 +7,19 @@ receivers:
       http:
         endpoint: 0.0.0.0:4318
   
-  # Low priority OTLP receiver
-  otlp/lowprio:
-    protocols:
-      grpc:
-        endpoint: 0.0.0.0:4319
-      http:
-        endpoint: 0.0.0.0:4320
+  # # Low priority OTLP receiver
+  # otlp/lowprio:
+  #   protocols:
+  #     grpc:
+  #       endpoint: 0.0.0.0:4319
+  #     http:
+  #       endpoint: 0.0.0.0:4320
 
 processors:
-  # No custom processors needed for priority-based routing
+  priority:
+    memory_limit_percentage: 50
+    burst_memory_limit_percentage: 80
+    check_interval: 200ms
 
 exporters:
   # Debug exporter for development and testing
@@ -36,16 +39,21 @@ service:
   
   # Priority-based pipelines
   pipelines:
-    # High priority pipeline - receives from port 4317/4318
-    traces/highprio:
-      receivers: [otlp/highprio]
-      processors: []
-      exporters: [otlp, debug]
+    # # High priority pipeline - receives from port 4317/4318
+    # traces/highprio:
+    #   receivers: [otlp/highprio]
+    #   processors: []
+    #   exporters: [otlp, debug]
     
-    # Low priority pipeline - receives from port 4319/4320
-    traces/lowprio:
-      receivers: [otlp/lowprio]
-      processors: []
+    # # Low priority pipeline - receives from port 4319/4320
+    # traces/lowprio:
+    #   receivers: [otlp/lowprio]
+    #   processors: []
+    #   exporters: [otlp, debug]
+    traces:
+      # receivers: [otlp/highprio, otlp/lowprio]
+      receivers: [otlp/highprio]
+      processors: [priority]
       exporters: [otlp, debug]
   
   # Extensions for additional functionality

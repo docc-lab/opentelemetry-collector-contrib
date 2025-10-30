@@ -151,11 +151,29 @@ func (p *priorityProcessor) monitorMemory(ctx context.Context) {
 }
 
 func (p *priorityProcessor) checkMemory() {
-	ms := &runtime.MemStats{}
-	runtime.ReadMemStats(ms)
+	// Try to get actual container memory usage from cgroups (most accurate)
+	var currentMemory uint64
+	var err error
+
+	isV2, err := isCGroupV2()
+	if err == nil {
+		if isV2 {
+			currentMemory, err = readCGroupV2MemoryCurrent()
+		} else {
+			currentMemory, err = readCGroupV1MemoryUsage()
+		}
+	}
+
+	// Fallback to runtime.MemStats.Sys if cgroup reading fails
+	// Sys includes heap, stack, and other runtime allocations (better than Alloc)
+	if err != nil || currentMemory == 0 {
+		ms := &runtime.MemStats{}
+		runtime.ReadMemStats(ms)
+		currentMemory = ms.Sys
+	}
 
 	p.memoryState.Lock()
-	p.currentMemory = ms.Alloc
+	p.currentMemory = currentMemory
 	p.memoryState.Unlock()
 
 	p.lastCheck = time.Now()
@@ -488,4 +506,36 @@ func readCGroupV1MemoryLimit() (uint64, error) {
 	}
 
 	return uint64(limit), nil
+}
+
+// readCGroupV2MemoryCurrent reads current memory usage from cgroup v2
+func readCGroupV2MemoryCurrent() (uint64, error) {
+	data, err := os.ReadFile("/sys/fs/cgroup/memory.current")
+	if err != nil {
+		return 0, err
+	}
+
+	usageStr := strings.TrimSpace(string(data))
+	usage, err := strconv.ParseUint(usageStr, 10, 64)
+	if err != nil {
+		return 0, err
+	}
+
+	return usage, nil
+}
+
+// readCGroupV1MemoryUsage reads current memory usage from cgroup v1
+func readCGroupV1MemoryUsage() (uint64, error) {
+	data, err := os.ReadFile("/sys/fs/cgroup/memory/memory.usage_in_bytes")
+	if err != nil {
+		return 0, err
+	}
+
+	usageStr := strings.TrimSpace(string(data))
+	usage, err := strconv.ParseUint(usageStr, 10, 64)
+	if err != nil {
+		return 0, err
+	}
+
+	return usage, nil
 }
