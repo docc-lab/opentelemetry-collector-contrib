@@ -7,6 +7,20 @@ receivers:
       http:
         endpoint: 0.0.0.0:4318
   
+  configdiscovery:
+    endpoint: ":8080"
+    config_map:
+      # Checkpoint distance (cpd) - determines how often spans are checkpointed
+      # Priority is high if depth % cpd == 0 (root span at depth 0 is always checkpointed)
+      cpd: 3
+      # Add other config properties here as needed
+      # Example nested map:
+      # nested_config:
+      #   key1: value1
+      #   key2: value2
+      # Example array:
+      # some_array: [item1, item2, item3]
+    
   # # Low priority OTLP receiver
   # otlp/lowprio:
   #   protocols:
@@ -55,6 +69,13 @@ service:
       receivers: [otlp/highprio]
       processors: [priority]
       exporters: [otlp, debug]
+    
+    # Config discovery receiver pipeline - starts the HTTP server for config discovery
+    # This receiver doesn't consume logs, it only provides HTTP endpoints
+    logs/configdiscovery:
+      receivers: [configdiscovery]
+      processors: []
+      exporters: [debug]
   
   # Extensions for additional functionality
   extensions: []

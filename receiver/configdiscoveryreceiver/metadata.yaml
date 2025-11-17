@@ -1,0 +1,10 @@
+type: configdiscovery
+
+status:
+  class: receiver
+  stability:
+    development: [logs]
+  distributions: [contrib]
+  codeowners:
+    active: []
+

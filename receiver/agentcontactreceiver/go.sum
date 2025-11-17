@@ -113,8 +113,8 @@ go.opentelemetry.io/collector/extension/extensionmiddleware v0.128.0 h1:WqXFWdep
 go.opentelemetry.io/collector/extension/extensionmiddleware v0.128.0/go.mod h1:QgNPIB0EK6u06YmILuuT+CejXZNeRMEBtLpbInh45+w=
 go.opentelemetry.io/collector/extension/extensionmiddleware/extensionmiddlewaretest v0.128.0 h1:glt5Lg/dhhyOF/JkrMgwqCFcI/Lc55HuI8yQmxaPKZw=
 go.opentelemetry.io/collector/extension/extensionmiddleware/extensionmiddlewaretest v0.128.0/go.mod h1:sRivd8Edtsh0gbzsTFTqKokJi0HyZMwuCMZVkbNPD3s=
-go.opentelemetry.io/collector/featuregate v1.42.0 h1:uCVwumVBVex46DsG/fvgiTGuf9f53bALra7vGyKaqFI=
-go.opentelemetry.io/collector/featuregate v1.42.0/go.mod h1:d0tiRzVYrytB6LkcYgz2ESFTv7OktRPQe0QEQcPt1L4=
+go.opentelemetry.io/collector/featuregate v1.45.1-0.20251106125304-a6a176660925 h1:PYWGcouUFCW7BUU8/YB5eN3OeqBi98CjpLtZStVuJvM=
+go.opentelemetry.io/collector/featuregate v1.45.1-0.20251106125304-a6a176660925/go.mod h1:d0tiRzVYrytB6LkcYgz2ESFTv7OktRPQe0QEQcPt1L4=
 go.opentelemetry.io/collector/internal/telemetry v0.130.1 h1:IWCkiA2bjR1HzWjX7zgUxfQo4Z5DbO65p4JqbOL2MSM=
 go.opentelemetry.io/collector/internal/telemetry v0.130.1/go.mod h1:QWpQOh7Xm0gF8GojWc0PXFFtSP0VSRFpQb0nIsRk0rA=
 go.opentelemetry.io/collector/pdata v1.36.1 h1:aE8TWqjrVbJE8ExayBwJrNaLejYKDjsYs1uG4zSRPWc=
