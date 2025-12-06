@@ -34,6 +34,7 @@ processors:
     memory_limit_percentage: 50
     burst_memory_limit_percentage: 80
     check_interval: 200ms
+  batch:
 
 exporters:
   # Debug exporter for development and testing
@@ -67,7 +68,7 @@ service:
     traces:
       # receivers: [otlp/highprio, otlp/lowprio]
       receivers: [otlp/highprio]
-      processors: [priority]
+      processors: [priority, batch]
       exporters: [otlp, debug]
     
     # Config discovery receiver pipeline - starts the HTTP server for config discovery
