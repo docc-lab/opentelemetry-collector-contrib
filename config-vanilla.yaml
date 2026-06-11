@@ -7,17 +7,48 @@ receivers:
         endpoint: 0.0.0.0:4318
 
 exporters:
-  # Debug exporter for development and testing
-  debug:
-    verbosity: detailed
-  
-  # OTLP exporter for sending processed spans to downstream systems
+  # Debug exporter removed: its default queue_capacity=1 was the source of
+  # "silent drops" (otelcol_exporter_enqueue_failed_spans{exporter="debug"})
+  # we previously mis-attributed to jaeger-bound loss. Real downstream
+  # delivery only flows through `otlp`; keeping debug in the pipeline just
+  # adds a spurious lossy sink that confounds the per-exporter counters.
+
+  # OTLP exporter for sending processed spans to downstream systems.
+  # sending_queue + retry_on_failure are configured identically to
+  # test-config-bridges.yaml so cross-variant comparisons share the same
+  # downstream-backpressure behavior. Without these the OTel defaults
+  # apply: queue_size=1000 and max_elapsed_time=5m, which would make the
+  # vanilla collector backpressure / drop very differently from the
+  # bridges collector and confound the comparison.
   otlp:
     endpoint: "http://localhost:4317"
     tls:
       insecure: true
+    sending_queue:
+      enabled: true
+      queue_size: 1000
+      block_on_overflow: false
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 0
 
 processors:
+  # Memory limiter MUST be first in the pipeline so refusals propagate as
+  # gRPC Unavailable back to the receiver (and from there to the SDK
+  # exporter), rather than dropping silently behind downstream stages.
+  # Community-default tuning (see OTel collector memorylimiterprocessor
+  # README and the Dash0 production guide):
+  #   limit_percentage:        70–80% of container memory  (hard limit,
+  #                                                         also forces GC)
+  #   spike_limit_percentage:  ~20% of the hard limit       (soft trigger
+  #                                                         = limit - spike)
+  #   check_interval:          1s for typical, shorter for spiky traffic
+  memory_limiter:
+    check_interval: 100ms
+    limit_percentage: 70
+    spike_limit_percentage: 20
   batch:
 
 service:
@@ -27,5 +58,5 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [batch]
-      exporters: [debug,otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp]

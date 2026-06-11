@@ -1,82 +1,80 @@
 receivers:
-  # High priority OTLP receiver
   otlp/highprio:
     protocols:
       grpc:
         endpoint: 0.0.0.0:4317
+        include_metadata: true        # propagates "bridges-priority" header into ctx
       http:
         endpoint: 0.0.0.0:4318
-  
+        include_metadata: true
+
   configdiscovery:
     endpoint: ":8080"
     config_map:
-      # Checkpoint distance (cpd) - determines how often spans are checkpointed
-      # Priority is high if depth % cpd == 0 (root span at depth 0 is always checkpointed)
       cpd: 3
-      # Add other config properties here as needed
-      # Example nested map:
-      # nested_config:
-      #   key1: value1
-      #   key2: value2
-      # Example array:
-      # some_array: [item1, item2, item3]
-    
-  # # Low priority OTLP receiver
-  # otlp/lowprio:
-  #   protocols:
-  #     grpc:
-  #       endpoint: 0.0.0.0:4319
-  #     http:
-  #       endpoint: 0.0.0.0:4320
 
 processors:
+  # Priority processor — pass-through architecture.
+  #
+  # This processor does NOT buffer. It reads the "bridges-priority"
+  # gRPC metadata header (set per-batch by the SB SDK) and the current
+  # alloc-vs-threshold pressure state, then either passes the batch
+  # straight through to the next consumer or returns gRPC Unavailable
+  # to the SDK. In-flight memory is bounded by the downstream otlp
+  # exporter's sending_queue (queue_size × send_batch_size), exactly
+  # like the vanilla / memory_limiter pipeline.
+  #
+  # Admission matrix:
+  #   NoPressure (alloc < low)        → admit all
+  #   Low        (low ≤ alloc < mid)  → admit HP; refuse LP
+  #   Mid/High   (alloc ≥ mid)        → refuse all
   priority:
-    memory_limit_percentage: 50
-    burst_memory_limit_percentage: 80
-    check_interval: 200ms
-  batch:
+    low_percentage:         40
+    mid_percentage:         60
+    high_percentage:        80
+    check_interval:         100ms
 
 exporters:
-  # Debug exporter for development and testing
+  # Debug exporter removed from the TRACES pipeline: its default
+  # queue_capacity=1 was the source of "silent drops" we previously
+  # mis-attributed to jaeger-bound loss. The configdiscovery logs
+  # pipeline keeps using it (every otelcol pipeline needs ≥1 exporter,
+  # and configdiscovery is dev-only so the tiny-queue drops don't matter).
   debug:
     verbosity: detailed
-  
-  # OTLP exporter for sending processed spans to downstream systems
+
+  # otlp exporter owns the in-flight buffer via sending_queue. With the
+  # priority processor now pass-through, this is where in-flight memory
+  # is bounded — same architecture as the vanilla/memory_limiter
+  # pipeline.
   otlp:
-    endpoint: "http://localhost:4317"
+    endpoint: ${JAEGER_SBREV0_OTLP_DIAL_ADDR}
     tls:
       insecure: true
+    sending_queue:
+      enabled: true
+      num_consumers: 10
+      queue_size: 1000
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 0
 
 service:
   telemetry:
     logs:
       level: DEBUG
-  
-  # Priority-based pipelines
+
   pipelines:
-    # # High priority pipeline - receives from port 4317/4318
-    # traces/highprio:
-    #   receivers: [otlp/highprio]
-    #   processors: []
-    #   exporters: [otlp, debug]
-    
-    # # Low priority pipeline - receives from port 4319/4320
-    # traces/lowprio:
-    #   receivers: [otlp/lowprio]
-    #   processors: []
-    #   exporters: [otlp, debug]
     traces:
-      # receivers: [otlp/highprio, otlp/lowprio]
-      receivers: [otlp/highprio]
-      processors: [priority, batch]
-      exporters: [otlp, debug]
-    
-    # Config discovery receiver pipeline - starts the HTTP server for config discovery
-    # This receiver doesn't consume logs, it only provides HTTP endpoints
+      receivers:  [otlp/highprio]
+      processors: [priority]
+      exporters:  [otlp]
+
     logs/configdiscovery:
-      receivers: [configdiscovery]
+      receivers:  [configdiscovery]
       processors: []
-      exporters: [debug]
-  
-  # Extensions for additional functionality
+      exporters:  [debug]
+
   extensions: []

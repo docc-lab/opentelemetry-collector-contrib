@@ -25,19 +25,20 @@ func NewFactory() processor.Factory {
 	)
 }
 
-// createDefaultConfig returns defaults for the three-zone passthrough
-// pressure model: ultrasoft=35 (LP refused, HP admitted), soft=50
-// (refuse all, memory_limiter soft semantics), hard=70 (force GC and
-// refuse all if still over, memory_limiter hard semantics). Pair with
-// a downstream pipeline that uses batch + otlp_exporter with a
-// generous non-blocking sending_queue (queue_size=1000,
-// block_on_overflow=false) — same shape memory_limiter expects.
+// createDefaultConfig returns defaults for the two-zone pressure
+// model: soft=50 (LP refused, HP admits only by evicting LP), hard=70
+// (force GC and refuse all if still over). NumWorkers defaults to 10
+// to match the default sending_queue.num_consumers on the OTLP
+// exporter — pair with queue_size=10, block_on_overflow=true downstream
+// to get the backpressure-into-priority semantics this processor
+// expects. See Config docstring for full behavior.
 func createDefaultConfig() component.Config {
 	return &Config{
-		UltrasoftPercentage: 35,
-		SoftPercentage:      50,
-		HardPercentage:      70,
-		CheckInterval:       100 * time.Millisecond,
+		SoftPercentage: 50,
+		HardPercentage: 70,
+		NumWorkers:     10,
+		EvictionRatio:  2,
+		CheckInterval:  100 * time.Millisecond,
 	}
 }
 
