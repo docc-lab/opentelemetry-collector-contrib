@@ -13,71 +13,93 @@ import (
 var (
 	ErrCheckIntervalRequired = errors.New("check_interval must be greater than zero")
 	ErrInvalidPercentage     = errors.New("memory limits must be between 1 and 100 percent")
-	ErrInvalidThresholdOrder = errors.New("memory thresholds must satisfy ultrasoft_percentage < soft_percentage < hard_percentage")
+	ErrInvalidThresholdOrder = errors.New("soft_percentage < hard_percentage required")
+	ErrInvalidSafetyFactor   = errors.New("cp_safety_factor must be greater than zero")
 )
 
 var _ component.Config = (*Config)(nil)
 
-// Config defines the three-zone memory-pressure model used by the
-// priority processor. The processor is a pure passthrough — it never
-// buffers, never holds queues, never spawns workers. Each incoming
-// batch is either forwarded unchanged or refused (gRPC Unavailable)
-// based on the current pressure zone and the batch's priority tag from
-// the "bridges-priority" gRPC metadata header set by the SB SDK.
+// Config is the analytic LP-shedding controller (v18). It is a pure
+// passthrough: each batch is forwarded or refused (gRPC Unavailable) by
+// priority tag ("bridges-priority", "lp" vs HP) and controller state.
 //
-// Behavior at each zone (alloc = runtime.MemStats.Alloc):
+// Admission each request (alloc = runtime.MemStats.Alloc):
+//   - alloc ≥ hard:  GC, then if still ≥ hard refuse ALL
+//   - alloc ≥ soft:  refuse ALL (memory_limiter contract)
+//   - alloc ≥ US:    refuse LP, admit HP   (the LP-shedding state)
+//   - alloc < US:    admit ALL
 //
-//   - NoPressure (alloc < ultrasoft):
-//     admit everything; return input traces unchanged
+// LP shedding is BINARY (shed all LP above US, none below); the graded
+// behavior observed across the ramp is the duty cycle of the GC sawtooth
+// crossing US, not a per-batch probability. There is no f, no integral,
+// no RNG.
 //
-//   - Ultrasoft (ultrasoft ≤ alloc < soft):
-//     LP refused (gRPC Unavailable); HP admitted unchanged
+// US (the level where LP shedding begins) is DERIVED every tick, not a
+// setpoint:
 //
-//   - Soft (soft ≤ alloc < hard):
-//     refuse all (matches memory_limiter's soft behavior)
+//	hp_commit = hp_rate × bytes_per_hp_span × overhead   (heap B/s, unsheddable)
+//	lp_commit = lp_rate × bytes_per_lp_span × overhead   (heap B/s, the LP lever)
+//	lp_share  = lp_commit_env / (hp_commit_env + lp_commit_env)
+//	margin    = hp_commit_env × horizon × (1/lp_share) × cp_safety_factor
+//	US        = clamp(soft − margin, 0, soft)
 //
-//   - Hard (alloc ≥ hard):
-//     force runtime.GC(), re-read alloc. If still ≥ hard, refuse all
-//     until the next check_interval tick re-evaluates
+// The buffer below soft equals the HP-driven alloc rise we cannot shed
+// over the response horizon, scaled up when LP is a weak lever (small
+// lp_share) and by cp_safety_factor. hp_rate is the ABSOLUTE arrival
+// rate, so a pure load surge lowers US immediately; HP-heavy or
+// fast-rising load begins shedding LP earlier, carving the cushion that
+// lets 100% of LP drop before any CP does.
 //
-// The downstream pipeline is expected to be a standard memlim-style
-// setup: priority → batch → otlp_exporter with a generous non-blocking
-// sending_queue (queue_size ≫ num_consumers, block_on_overflow=false).
-// This keeps the priority processor's feedback loop identical to
-// memory_limiter's — alloc rises from spans transiting the pipeline,
-// admission tightens, alloc falls — with the only addition being the
-// LP-only refusal tier on top.
+// THREE behavioral knobs: soft (S) and hard (H) — the memory_limiter
+// contract — and cp_safety_factor, the CP-vs-LP tradeoff dial. Higher
+// sheds LP earlier / protects CP harder; ~1.0 sheds only as late as the
+// measured HP rise demands. check_interval is sampling cadence, not a
+// behavioral knob. Everything else (overhead factor, horizon, EMA
+// smoothing, sampling rate, idle threshold) is a fixed internal constant
+// — a physical conversion or time constant, see the const block in
+// priority.go. None is a gain; none needs per-deployment tuning.
 type Config struct {
-	// UltrasoftPercentage is the alloc threshold where LP gets refused
-	// but HP still admits. Default 35.
-	UltrasoftPercentage uint32 `mapstructure:"ultrasoft_percentage"`
-
-	// SoftPercentage is the alloc threshold where everything gets
-	// refused (matches memory_limiter's soft behavior). Default 50.
+	// SoftPercentage (S): refuse-all threshold (memory_limiter contract).
 	SoftPercentage uint32 `mapstructure:"soft_percentage"`
-
-	// HardPercentage is the alloc threshold where the processor forces
-	// a GC and re-checks; still-over allocs refuse everything (matches
-	// memory_limiter's hard behavior). Default 70.
+	// HardPercentage (H): force-GC threshold.
 	HardPercentage uint32 `mapstructure:"hard_percentage"`
-
-	// CheckInterval is how often the memstats probe runs to update the
-	// pressure state. Default 100ms (matches memory_limiter).
+	// CPSafetyFactor: multiplies the derived (rate × ratio) LP-shed
+	// margin below soft — the one CP-vs-LP policy dial. Higher sheds LP
+	// earlier and protects CP harder; ~1.0 sheds only as late as the
+	// measured HP rise requires. Default 2.0.
+	CPSafetyFactor float64 `mapstructure:"cp_safety_factor"`
+	// CheckInterval: controller sampling cadence. Default 100ms
+	// (matches memory_limiter). Sampling cadence, not a behavioral knob.
 	CheckInterval time.Duration `mapstructure:"check_interval"`
+
+	// ForceGC is the master switch for ALL manual (forced) GC — the hard
+	// backstop AND the throttled soft/ultrasoft clawback. Default true.
+	// Set false to do NO manual GC and rely purely on the Go runtime
+	// (GOGC + GOMEMLIMIT) — useful to isolate the controller's shedding
+	// from forced-GC CPU cost on a CPU-limited collector.
+	ForceGC bool `mapstructure:"force_gc"`
+	// GCSoftInterval / GCUltrasoftInterval throttle the forced GC in the
+	// soft (soft ≤ alloc < hard) and ultrasoft (US ≤ alloc < soft) bands
+	// when ForceGC is true. Defaults 1s / 2s. The hard backstop (alloc ≥
+	// hard) is unthrottled. Only consulted when ForceGC is true.
+	GCSoftInterval      time.Duration `mapstructure:"gc_soft_interval"`
+	GCUltrasoftInterval time.Duration `mapstructure:"gc_ultrasoft_interval"`
 }
 
-// Validate checks whether the configuration is internally consistent.
 func (config *Config) Validate() error {
 	if config.CheckInterval <= 0 {
 		return ErrCheckIntervalRequired
 	}
-	for _, p := range []uint32{config.UltrasoftPercentage, config.SoftPercentage, config.HardPercentage} {
+	for _, p := range []uint32{config.SoftPercentage, config.HardPercentage} {
 		if p < 1 || p > 100 {
 			return ErrInvalidPercentage
 		}
 	}
-	if !(config.UltrasoftPercentage < config.SoftPercentage && config.SoftPercentage < config.HardPercentage) {
+	if config.SoftPercentage >= config.HardPercentage {
 		return ErrInvalidThresholdOrder
+	}
+	if config.CPSafetyFactor <= 0 {
+		return ErrInvalidSafetyFactor
 	}
 	return nil
 }

@@ -25,19 +25,20 @@ func NewFactory() processor.Factory {
 	)
 }
 
-// createDefaultConfig returns defaults for the three-zone passthrough
-// pressure model: ultrasoft=35 (LP refused, HP admitted), soft=50
-// (refuse all, memory_limiter soft semantics), hard=70 (force GC and
-// refuse all if still over, memory_limiter hard semantics). Pair with
-// a downstream pipeline that uses batch + otlp_exporter with a
-// generous non-blocking sending_queue (queue_size=1000,
-// block_on_overflow=false) — same shape memory_limiter expects.
+// createDefaultConfig returns defaults for the analytic LP-shedding
+// controller. soft=50 / hard=70 mirror the vanilla memory_limiter
+// contract; cp_safety_factor=1.0 means the LP-shed margin is FULLY derived
+// (amplitude_env + (1/lp_share)·hp_rise) with no extra cushion — it is an
+// optional overall trim on the drift term, not a required gain.
 func createDefaultConfig() component.Config {
 	return &Config{
-		UltrasoftPercentage: 35,
 		SoftPercentage:      50,
 		HardPercentage:      70,
+		CPSafetyFactor:      1.0,
 		CheckInterval:       100 * time.Millisecond,
+		ForceGC:             true,
+		GCSoftInterval:      1 * time.Second,
+		GCUltrasoftInterval: 2 * time.Second,
 	}
 }
 
