@@ -22,6 +22,7 @@ type Config struct {
 	StatusCode       string
 	Batch            bool
 	NumSpanLinks     int
+	EventName        string
 
 	SpanDuration time.Duration
 }
@@ -44,6 +45,7 @@ func (c *Config) Flags(fs *pflag.FlagSet) {
 	fs.StringVar(&c.StatusCode, "status-code", c.StatusCode, "Status code to use for the spans, one of (Unset, Error, Ok) or the equivalent integer (0,1,2)")
 	fs.BoolVar(&c.Batch, "batch", c.Batch, "Whether to batch traces")
 	fs.IntVar(&c.NumSpanLinks, "span-links", c.NumSpanLinks, "Number of span links to generate for each span")
+	fs.StringVar(&c.EventName, "event-name", c.EventName, "If set, add one span event with this name to each span (carrier experiment)")
 	fs.DurationVar(&c.SpanDuration, "span-duration", c.SpanDuration, "The duration of each generated span.")
 }
 

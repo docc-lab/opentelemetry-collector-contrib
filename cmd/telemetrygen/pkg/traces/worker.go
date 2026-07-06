@@ -37,6 +37,7 @@ type worker struct {
 	loadSize         int                   // desired minimum size in MB of string data for each generated trace
 	spanDuration     time.Duration         // duration of generated spans
 	numSpanLinks     int                   // number of span links to generate per span
+	eventName        string                // if set, add one span event with this name per span
 	logger           *zap.Logger
 	allowFailures    bool                // whether to continue on export failures
 	spanContexts     []trace.SpanContext // collection of span contexts for linking
@@ -160,12 +161,18 @@ func (w *worker) simulateTraces(telemetryAttributes []attribute.KeyValue) {
 			w.addSpanContext(child.SpanContext())
 
 			endTimestamp = trace.WithTimestamp(spanEnd)
+			if w.eventName != "" {
+				child.AddEvent(w.eventName)
+			}
 			child.SetStatus(w.statusCode, "")
 			child.End(endTimestamp)
 
 			// Reset the start and end for next span
 			spanStart = spanEnd
 			spanEnd = spanStart.Add(w.spanDuration)
+		}
+		if w.eventName != "" {
+			sp.AddEvent(w.eventName)
 		}
 		sp.SetStatus(w.statusCode, "")
 		sp.End(endTimestamp)
