@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -42,6 +43,9 @@ type worker struct {
 	allowFailures    bool                // whether to continue on export failures
 	spanContexts     []trace.SpanContext // collection of span contexts for linking
 	spanContextsMu   sync.RWMutex        // mutex for spanContexts slice
+	bridge           string              // none|pb|cgpb|sb synthetic bridge payload mode
+	cpd              int                 // checkpoint distance (every cpd-th span carries _br)
+	brSize           int                 // bytes in the _br checkpoint payload
 }
 
 const (
@@ -96,10 +100,32 @@ func (w *worker) generateSpanLinks() []trace.Link {
 	return links
 }
 
+// bridgeAttrs returns the synthetic bridge payload for the span at index
+// spanNo. Every w.cpd-th span is a "checkpoint" carrying _br sized to
+// w.brSize bytes; the rest carry the breadcrumb (_d = 1 byte for pb/cgpb,
+// _o = 2 bytes for sb). bridge=="none"/unknown adds nothing. String values
+// are an exact-byte-size proxy for the real bytes payload (OTLP string_value
+// and bytes_value are both length-delimited and marshal identically).
+func (w *worker) bridgeAttrs(spanNo int) []attribute.KeyValue {
+	switch w.bridge {
+	case "pb", "cgpb", "sb":
+	default:
+		return nil
+	}
+	if w.cpd > 0 && spanNo%w.cpd == 0 { // checkpoint span
+		return []attribute.KeyValue{attribute.String("_br", strings.Repeat("x", w.brSize))}
+	}
+	if w.bridge == "sb" {
+		return []attribute.KeyValue{attribute.String("_o", "oo")} // 2-byte ordinal‖depth
+	}
+	return []attribute.KeyValue{attribute.String("_d", "d")} // 1-byte depth varint
+}
+
 func (w *worker) simulateTraces(telemetryAttributes []attribute.KeyValue) {
 	tracer := otel.Tracer("telemetrygen")
 	limiter := rate.NewLimiter(w.limitPerSecond, 1)
 	var i int
+	var spanNo int // running span index for bridge checkpoint cadence
 
 	for w.running.Load() {
 		spanStart := time.Now()
@@ -121,6 +147,10 @@ func (w *worker) simulateTraces(telemetryAttributes []attribute.KeyValue) {
 			trace.WithLinks(parentLinks...),
 		)
 		sp.SetAttributes(telemetryAttributes...)
+		if a := w.bridgeAttrs(spanNo); a != nil {
+			sp.SetAttributes(a...)
+		}
+		spanNo++
 		for j := 0; j < w.loadSize; j++ {
 			sp.SetAttributes(common.CreateLoadAttribute(fmt.Sprintf("load-%v", j), 1))
 		}
@@ -156,6 +186,10 @@ func (w *worker) simulateTraces(telemetryAttributes []attribute.KeyValue) {
 				trace.WithLinks(childLinks...),
 			)
 			child.SetAttributes(telemetryAttributes...)
+			if a := w.bridgeAttrs(spanNo); a != nil {
+				child.SetAttributes(a...)
+			}
+			spanNo++
 
 			// Store the child span context for potential future linking
 			w.addSpanContext(child.SpanContext())

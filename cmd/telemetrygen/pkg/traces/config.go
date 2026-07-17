@@ -25,6 +25,11 @@ type Config struct {
 	EventName        string
 
 	SpanDuration time.Duration
+
+	// Bridge microbenchmark: synthetic per-span bridge payload.
+	Bridge string // none|pb|cgpb|sb
+	CPD    int    // checkpoint distance: every CPD-th span carries _br
+	BrSize int    // bytes in the _br checkpoint payload value
 }
 
 func NewConfig() *Config {
@@ -47,6 +52,10 @@ func (c *Config) Flags(fs *pflag.FlagSet) {
 	fs.IntVar(&c.NumSpanLinks, "span-links", c.NumSpanLinks, "Number of span links to generate for each span")
 	fs.StringVar(&c.EventName, "event-name", c.EventName, "If set, add one span event with this name to each span (carrier experiment)")
 	fs.DurationVar(&c.SpanDuration, "span-duration", c.SpanDuration, "The duration of each generated span.")
+
+	fs.StringVar(&c.Bridge, "bridge", c.Bridge, "Synthetic bridge payload mode: none|pb|cgpb|sb (checkpoint spans get _br; others get _d/_o)")
+	fs.IntVar(&c.CPD, "cpd", c.CPD, "Checkpoint distance: every CPD-th span is a checkpoint carrying _br")
+	fs.IntVar(&c.BrSize, "br-size", c.BrSize, "Byte size of the _br checkpoint payload value")
 }
 
 // SetDefaults sets the default values for the configuration
@@ -63,6 +72,9 @@ func (c *Config) SetDefaults() {
 	c.Batch = true
 	c.NumSpanLinks = 0
 	c.SpanDuration = 123 * time.Microsecond
+	c.Bridge = "none"
+	c.CPD = 6
+	c.BrSize = 25
 }
 
 // Validate validates the test scenario parameters.
