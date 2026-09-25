@@ -20,7 +20,7 @@ func validateReversePolicy(config map[string]interface{}) error {
 	}
 	value, present := config["reverse_probability"]
 	switch policy {
-	case "ttl", "inverse_depth", "depth_linear":
+	case "ttl", "inverse_depth", "depth_linear", "depth_cubic": // Tomislav-RetCtx: + depth_cubic (Blueprint SDK)
 		if present {
 			return errors.New("config_map: reverse_probability requires reverse_policy: probability")
 		}
@@ -29,7 +29,7 @@ func validateReversePolicy(config map[string]interface{}) error {
 			return errors.New("config_map: probability policy requires finite reverse_probability in [0,1]")
 		}
 	default:
-		return errors.New("config_map: reverse_policy must be ttl, probability, inverse_depth, or depth_linear")
+		return errors.New("config_map: reverse_policy must be ttl, probability, inverse_depth, depth_linear, or depth_cubic")
 	}
 	return nil
 }

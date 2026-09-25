@@ -11,10 +11,28 @@ import (
 )
 
 var (
-	ErrCheckIntervalRequired = errors.New("check_interval must be greater than zero")
-	ErrInvalidPercentage     = errors.New("memory limits must be between 1 and 100 percent")
-	ErrInvalidThresholdOrder = errors.New("soft_percentage < hard_percentage required")
-	ErrInvalidSafetyFactor   = errors.New("cp_safety_factor must be greater than zero")
+	ErrCheckIntervalRequired   = errors.New("check_interval must be greater than zero")
+	ErrInvalidPercentage       = errors.New("memory limits must be between 1 and 100 percent")
+	ErrInvalidThresholdOrder   = errors.New("soft_percentage < hard_percentage required")
+	ErrInvalidSafetyFactor     = errors.New("cp_safety_factor must be greater than zero")
+	ErrInvalidMarginMode       = errors.New(`us_margin_mode must be "arrival" or "backlog"`)
+	ErrInvalidLPRefusalCode    = errors.New(`lp_refusal_code must be "unavailable" or "resource_exhausted"`)
+	ErrInvalidCPUShedThreshold = errors.New("cpu_shed_threshold must be between 0 (off) and 1")
+	ErrInvalidMode             = errors.New(`mode must be "admission" or "queue"`)
+	ErrInvalidDispatchWorkers  = errors.New("dispatch_workers must be at least 1 in queue mode")
+)
+
+// Tomislav-RetCtx: US-margin modes and LP refusal codes (see Config).
+const (
+	MarginModeArrival = "arrival"
+	MarginModeBacklog = "backlog"
+
+	LPRefusalUnavailable       = "unavailable"
+	LPRefusalResourceExhausted = "resource_exhausted"
+
+	// Tomislav-RetCtx: processor stages (Config.Mode).
+	ModeAdmission = "admission"
+	ModeQueue     = "queue"
 )
 
 var _ component.Config = (*Config)(nil)
@@ -84,6 +102,52 @@ type Config struct {
 	// hard) is unthrottled. Only consulted when ForceGC is true.
 	GCSoftInterval      time.Duration `mapstructure:"gc_soft_interval"`
 	GCUltrasoftInterval time.Duration `mapstructure:"gc_ultrasoft_interval"`
+
+	// Tomislav-RetCtx: USMarginMode selects what the drift term of the US margin
+	// is built from.
+	//   - "arrival" (default, v18 behaviour): the GROSS arrival commit
+	//     (hp+lp rate x bytes/span x overhead) over the horizon. At high
+	//     throughput this reserves more than the whole soft headroom even while
+	//     the pipeline keeps up and the heap is flat, so LP is shed with no
+	//     memory pressure at all.
+	//   - "backlog": the measured NET heap growth (slope of the post-GC
+	//     troughs, i.e. live-heap backlog) over the horizon, plus a fixed
+	//     reaction reserve of reactionTicks of gross arrivals so a sudden
+	//     downstream stall is still covered until the growth is observed.
+	//     A pipeline that keeps up does not shed LP.
+	USMarginMode string `mapstructure:"us_margin_mode"`
+	// Tomislav-RetCtx: LPRefusalCode is the gRPC status returned when an LP
+	// batch is refused (any state). "unavailable" (default) is retryable: an
+	// upstream collector re-queues the shed LP and retries it, which turns this
+	// collector's LP shedding into upstream memory pressure. "resource_exhausted"
+	// (without RetryInfo) is non-retryable for the OTLP exporter, so upstream
+	// drops shed LP immediately. HP refusals are always "unavailable".
+	LPRefusalCode string `mapstructure:"lp_refusal_code"`
+	// Tomislav-RetCtx: CPUShedThreshold (0 = off, the default) sheds LP when this process's
+	// CPU use over the last second reaches this fraction of its cgroup CPU quota, even with
+	// no memory pressure. A CPU-bound collector (e.g. a gateway pinned at its quota) never
+	// reaches its memory thresholds -- the backlog waits upstream -- so memory alone never
+	// frees CPU for checkpoints. Pairs with the priorityotlp receiver, which refuses LP before
+	// decoding it, so shedding actually returns CPU.
+	CPUShedThreshold float64 `mapstructure:"cpu_shed_threshold"`
+	// Tomislav-RetCtx: CPUTarget (0 = off, the default) is GRADED LP admission: LP may use
+	// this process's CPU up to this fraction of its cgroup quota. Once per second the admitted
+	// LP fraction is rescaled by target / measured-CPU, so exactly as much LP is refused (before
+	// decode, by the priorityotlp receiver) as keeps the collector at the target -- instead of
+	// cpu_shed_threshold's all-or-nothing shedding. Memory pressure (US / soft / hard) still
+	// overrides. Requires the priorityotlp receiver (the gate is where the fraction is applied).
+	CPUTarget float64 `mapstructure:"cpu_target"`
+	// Tomislav-RetCtx: Mode selects the stage. "admission" (default, "" too) is the controller
+	// described above. "queue" is the strict-priority queue stage (queue.go): placed after the
+	// batch processor, with the exporter's sending_queue disabled, it holds the backlog the
+	// exporter queue used to hold, in separate HP and LP FIFOs, and always sends HP first. While
+	// a queue stage runs, the admission stage admits a checkpoint at soft/hard by evicting the
+	// oldest queued LP of at least its size, and refuses it only when no LP is queued. The
+	// memory fields are ignored in queue mode (the admission stage owns the state machine).
+	Mode string `mapstructure:"mode"`
+	// DispatchWorkers is the number of concurrent sends from the queue stage (the role of the
+	// exporter's sending_queue.num_consumers, which is disabled in this setup). Default 10.
+	DispatchWorkers int `mapstructure:"dispatch_workers"`
 }
 
 func (config *Config) Validate() error {
@@ -100,6 +164,31 @@ func (config *Config) Validate() error {
 	}
 	if config.CPSafetyFactor <= 0 {
 		return ErrInvalidSafetyFactor
+	}
+	switch config.USMarginMode {
+	case "", MarginModeArrival, MarginModeBacklog:
+	default:
+		return ErrInvalidMarginMode
+	}
+	if config.CPUShedThreshold < 0 || config.CPUShedThreshold > 1 {
+		return ErrInvalidCPUShedThreshold
+	}
+	if config.CPUTarget < 0 || config.CPUTarget > 1 {
+		return ErrInvalidCPUShedThreshold
+	}
+	switch config.LPRefusalCode {
+	case "", LPRefusalUnavailable, LPRefusalResourceExhausted:
+	default:
+		return ErrInvalidLPRefusalCode
+	}
+	switch config.Mode {
+	case "", ModeAdmission:
+	case ModeQueue:
+		if config.DispatchWorkers < 1 {
+			return ErrInvalidDispatchWorkers
+		}
+	default:
+		return ErrInvalidMode
 	}
 	return nil
 }

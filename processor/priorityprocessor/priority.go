@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"go.opentelemetry.io/collector/client"
@@ -91,6 +92,22 @@ const (
 	// relaxes a one-off spike. Frozen when idle (updateGCAmplitude returns
 	// early), so a pause never decays it.
 	ampDecay = 0.998
+
+	// Tomislav-RetCtx: backlog margin mode (Config.USMarginMode = "backlog").
+	// reactionTicks of GROSS arrivals are always reserved below soft, so a
+	// downstream stall that has not yet shown up as trough growth is covered
+	// for ~0.5s at the 100ms cadence (the controller reacts within one tick).
+	reactionTicks = 5
+	// troughSlopeAlpha smooths the per-GC-cycle trough slope (net live-heap
+	// growth). One cycle is ~1-3s under load, so 0.5 tracks within ~2 cycles.
+	troughSlopeAlpha = 0.5
+	// troughStaleSec: if no GC cycle completed for this long while under load,
+	// the heap has only been climbing; the growth estimate then falls back to
+	// the rise since the last trough (conservative).
+	troughStaleSec = 3.0
+
+	// cpuWindowTicks: CPU use is measured over this many ticks (~1s at 100ms).
+	cpuWindowTicks = 10
 )
 
 // pressureState is the refuse-all gate on real alloc vs soft/hard.
@@ -157,6 +174,13 @@ type priorityProcessor struct {
 
 	bytesPerHPSpan float64
 	bytesPerLPSpan float64
+	// Tomislav-RetCtx: bytesPerHPSpan/bytesPerLPSpan x1000 for the request path (the floats
+	// above are controller-goroutine only); the LP a checkpoint evicts is sized by it.
+	sizeRatioMilli atomic.Int64
+	// Tomislav-RetCtx: checkpoint spans admitted at soft/hard by evicting queued LP (queue.go).
+	hpAdmittedByEviction int64
+	// Tomislav-RetCtx: LP spans refused because LP was already waiting in the queue stage.
+	lpRefusedBacklog int64
 
 	velocityInit         bool
 	prevAlloc            uint64
@@ -191,6 +215,39 @@ type priorityProcessor struct {
 	lastLPShareMilli atomic.Int64
 	lastUSBytes      atomic.Int64
 	lastPeakBytes    atomic.Int64
+
+	// Tomislav-RetCtx: backlog margin mode state (controller-goroutine only).
+	// troughPrev/troughPrevTime: the last post-GC trough and when its cycle
+	// completed; troughSlopeEMA: smoothed trough-to-trough slope (heap B/s).
+	now             func() time.Time
+	troughInit      bool
+	troughPrev      uint64
+	troughPrevTime  time.Time
+	troughSlopeInit bool
+	troughSlopeEMA  float64
+	lastGrowthBps   atomic.Int64
+	lastMarginBytes atomic.Int64
+
+	// Tomislav-RetCtx: gRPC code for LP refusals (Config.LPRefusalCode).
+	lpRefusal codes.Code
+	// readMem returns the controller's alloc reading (runtime MemStats.Alloc;
+	// injectable so tests can drive the controller with a scripted heap).
+	readMem func() uint64
+
+	// Tomislav-RetCtx: CPU shed signal (Config.CPUShedThreshold). readCPU returns this
+	// process's cumulative CPU seconds; cpuQuota is the cgroup CPU limit in cores (0 = none
+	// found, signal disabled). cpuRing holds the last cpuWindowTicks readings.
+	readCPU      func() float64
+	cpuQuota     float64
+	cpuRing      []float64
+	cpuIdx       int
+	cpuFilled    bool
+	lastCPUFrac  atomic.Int64 // x1000, for metrics
+	cpuSaturated bool
+	// Tomislav-RetCtx: graded LP admission (Config.CPUTarget): admitted LP fraction, rescaled
+	// once per CPU window.
+	lpAdmit    float64
+	gradedTick int
 }
 
 func newProcessor(config *Config, logger *zap.Logger, nextConsumer consumer.Traces) (*priorityProcessor, error) {
@@ -210,7 +267,9 @@ func newProcessor(config *Config, logger *zap.Logger, nextConsumer consumer.Trac
 		zap.Float64("cp_safety_factor", config.CPSafetyFactor),
 		zap.Duration("check_interval", config.CheckInterval),
 		zap.Float64("memory_overhead_factor", memoryOverheadFactor),
-		zap.Int("horizon_ticks", horizonTicks))
+		zap.Int("horizon_ticks", horizonTicks),
+		zap.String("us_margin_mode", marginMode(config)),
+		zap.String("lp_refusal_code", lpRefusalCode(config).String()))
 
 	p := &priorityProcessor{
 		config:            config,
@@ -223,7 +282,17 @@ func newProcessor(config *Config, logger *zap.Logger, nextConsumer consumer.Trac
 		hpArrivalsPerTick: make([]int64, arrivalWindowTicks),
 		lpArrivalsPerTick: make([]int64, arrivalWindowTicks),
 		peakRing:          make([]uint64, peakWindowTicks),
+		now:               time.Now,
+		lpRefusal:         lpRefusalCode(config),
 	}
+	p.readMem = p.readCurrentMemory
+	p.readCPU = processCPUSeconds
+	p.cpuQuota = cgroupCPUQuota()
+	// Tomislav-RetCtx: exactly cpuWindowTicks slots, so the slot about to be overwritten was
+	// written cpuWindowTicks ticks ago and the difference spans exactly one window (an extra
+	// slot made every reading ~10 % high: 11 ticks of CPU over a 10-tick window).
+	p.cpuRing = make([]float64, cpuWindowTicks)
+	p.lpAdmit = 1
 	p.admitFracMicro.Store(fracScale) // start admitting all LP
 	return p, nil
 }
@@ -277,7 +346,7 @@ func (p *priorityProcessor) checkLoop(ctx context.Context) {
 // shed fraction is the analytic amount of LP commit needed to remove the
 // projected overshoot over the horizon.
 func (p *priorityProcessor) tick() {
-	alloc := p.readCurrentMemory()
+	alloc := p.readMem()
 
 	// Arrival-rate detector runs every tick — it's how we know we're idle.
 	hpRate, lpRate := p.updateArrivalRates()
@@ -295,7 +364,7 @@ func (p *priorityProcessor) tick() {
 			preGC := alloc
 			runtime.GC()
 			atomic.AddInt64(&p.gcCount, 1)
-			alloc = p.readCurrentMemory()
+			alloc = p.readMem()
 			p.logger.Debug("Forced GC under hard pressure",
 				zap.Uint64("pre_gc_alloc_bytes", preGC),
 				zap.Uint64("post_gc_alloc_bytes", alloc))
@@ -320,7 +389,7 @@ func (p *priorityProcessor) tick() {
 			runtime.GC()
 			atomic.AddInt64(&p.gcCount, 1)
 			p.lastSoftGC = time.Now()
-			alloc = p.readCurrentMemory()
+			alloc = p.readMem()
 			p.logger.Debug("Forced GC under soft pressure",
 				zap.Uint64("pre_gc_alloc_bytes", preGC),
 				zap.Uint64("post_gc_alloc_bytes", alloc))
@@ -412,7 +481,8 @@ func (p *priorityProcessor) tick() {
 	// rate, which the 100ms-window decaying-max otherwise latches into margin
 	// jitter) and larger, so US descends earlier/deeper under load. Still scaled
 	// by lever-weakness (1/lp_share) so HP-heavy mixes reserve more.
-	totalRise := (p.hpCommitEnv + p.lpCommitEnv) * p.horizonSec
+	// (totalRise = (hp_commit_env + lp_commit_env) x horizon is formed inside
+	// computeMargin for the arrival mode.)
 	// PHASE-AWARE SWING: reserve the climb REMAINING to the next sawtooth peak,
 	// not the full amplitude. trough = recent post-GC low, (alloc-trough) = climb
 	// already done this cycle, ampEnv = expected full climb. Near the trough we
@@ -444,7 +514,14 @@ func (p *priorityProcessor) tick() {
 	if p.bytesPerLPSpan > 0 {
 		sizeGain = p.bytesPerHPSpan / p.bytesPerLPSpan
 	}
-	margin := phaseAmp + p.config.CPSafetyFactor*sizeGain*aggression*totalRise
+	// Tomislav-RetCtx: the drift term is either the gross arrival commit (v18,
+	// "arrival") or the measured net heap growth plus a short reaction reserve
+	// ("backlog"); see computeMargin.
+	growth := p.backlogGrowth(alloc, idle)
+	margin := computeMargin(marginMode(p.config), phaseAmp, p.config.CPSafetyFactor, sizeGain, aggression,
+		p.hpCommitEnv+p.lpCommitEnv, growth, p.horizonSec, float64(reactionTicks)*p.config.CheckInterval.Seconds())
+	p.lastGrowthBps.Store(int64(growth))
+	p.lastMarginBytes.Store(int64(margin))
 	us := float64(p.softLimit) - margin
 	if us < 0 {
 		us = 0
@@ -476,7 +553,7 @@ func (p *priorityProcessor) tick() {
 		runtime.GC()
 		atomic.AddInt64(&p.gcCount, 1)
 		p.lastUltrasoftGC = time.Now()
-		alloc = p.readCurrentMemory()
+		alloc = p.readMem()
 		p.logger.Debug("Forced GC under ultrasoft pressure",
 			zap.Uint64("pre_gc_alloc_bytes", preGC),
 			zap.Uint64("post_gc_alloc_bytes", alloc))
@@ -485,6 +562,15 @@ func (p *priorityProcessor) tick() {
 	if st == stateNoPressure && float64(alloc) >= us {
 		st = stateShedLP
 	}
+	// Tomislav-RetCtx: CPU shed signal -- shed LP when CPU use reaches the threshold of the
+	// quota, even with memory to spare (a CPU-bound collector's backlog waits upstream).
+	if p.cpuSignal() && st == stateNoPressure {
+		st = stateShedLP
+	}
+	// Tomislav-RetCtx: graded LP admission towards the CPU target (published to the gate).
+	p.updateGradedAdmission()
+	// Tomislav-RetCtx: at and above the ultrasoft line, queued LP is evicted (queue.go).
+	p.evictQueuedLP(st)
 
 	// admit_fraction mirrors the binary decision (1 = admitting LP, 0 =
 	// shedding) so the metrics/duty-cycle averaging still reads cleanly.
@@ -494,6 +580,7 @@ func (p *priorityProcessor) tick() {
 		p.admitFracMicro.Store(0)
 	}
 	p.state.Store(int32(st))
+	gate.publish(st, p.lpRefusal) // Tomislav-RetCtx: for the priorityotlp receiver's pre-decode check
 	p.lastUSBytes.Store(int64(us))
 	p.lastPeakBytes.Store(int64(peak))
 	p.lastLPShareMilli.Store(int64(lpShare * 1000))
@@ -572,6 +659,9 @@ func (p *priorityProcessor) updateGCAmplitude(alloc uint64, idle bool) float64 {
 				p.ampLo = cycle
 			}
 		}
+		// Tomislav-RetCtx: the cycle's low is the post-GC trough (live heap);
+		// its slope across cycles is the net backlog growth (backlog mode).
+		p.recordTrough(p.gcCycleLow)
 	}
 	// ampLo relaxes upward toward ampHi each tick (slow), so a single tiny
 	// cycle doesn't pin the band low forever.
@@ -684,6 +774,29 @@ func (p *priorityProcessor) updateByteEstimates() {
 			p.bytesPerLPSpan = byteEMAAlpha*v + (1-byteEMAAlpha)*p.bytesPerLPSpan
 		}
 	}
+	if p.bytesPerHPSpan > 0 && p.bytesPerLPSpan > 0 {
+		p.sizeRatioMilli.Store(int64(1000 * p.bytesPerHPSpan / p.bytesPerLPSpan))
+	}
+}
+
+// evictQueuedLP drops the LP waiting in the queue stage once the heap is at or above the
+// ultrasoft line (shedLP, soft, hard): new LP is already refused there, and the memory the queued
+// LP holds is freed before the refuse-all line rather than when it is reached.
+func (p *priorityProcessor) evictQueuedLP(st pressureState) {
+	if st == stateNoPressure {
+		return
+	}
+	if q := activeQueue.Load(); q != nil {
+		q.evictAllLP()
+	}
+}
+
+// sizeRatio is bytes per HP span / bytes per LP span (1 until both are measured).
+func (p *priorityProcessor) sizeRatio() float64 {
+	if r := p.sizeRatioMilli.Load(); r > 0 {
+		return float64(r) / 1000
+	}
+	return 1
 }
 
 func (p *priorityProcessor) readCurrentMemory() uint64 {
@@ -729,23 +842,38 @@ func (p *priorityProcessor) processTraces(ctx context.Context, td ptrace.Traces)
 	st := pressureState(p.state.Load())
 	switch st {
 	case stateSoft, stateHard:
-		// Refuse all (memory_limiter contract).
+		// Refuse all (memory_limiter contract). HP is always retryable; LP uses
+		// the configured code (Tomislav-RetCtx: lp_refusal_code).
 		if isLP {
 			atomic.AddInt64(&p.lpRefused, spanCount)
-		} else {
-			atomic.AddInt64(&p.hpRefused, spanCount)
+			return td, status.Error(p.lpRefusal, "priority processor: refusing all under "+stateName(st)+" pressure")
 		}
+		// Tomislav-RetCtx: with a queue stage running, a checkpoint is admitted by evicting
+		// queued LP of at least its size; refused only when no LP is left to evict.
+		if q := activeQueue.Load(); q != nil && q.evictFor(spanCount, p.sizeRatio()) {
+			atomic.AddInt64(&p.hpAdmitted, spanCount)
+			atomic.AddInt64(&p.hpAdmittedByEviction, spanCount)
+			return td, nil
+		}
+		atomic.AddInt64(&p.hpRefused, spanCount)
 		return td, status.Error(codes.Unavailable, "priority processor: refusing all under "+stateName(st)+" pressure")
 	case stateShedLP:
 		// Shed LP, admit HP.
 		if isLP {
 			atomic.AddInt64(&p.lpRefused, spanCount)
-			return td, status.Error(codes.Unavailable, "priority processor: shedding LP (alloc ≥ US)")
+			return td, status.Error(p.lpRefusal, "priority processor: shedding LP (alloc ≥ US)")
 		}
 		atomic.AddInt64(&p.hpAdmitted, spanCount)
 		return td, nil
 	default: // stateNoPressure — admit everything
+		// Tomislav-RetCtx: except LP while this hop is not keeping up or an upstream hop reports
+		// checkpoints waiting (see gate.Decide).
 		if isLP {
+			if q := activeQueue.Load(); (q != nil && q.hasWaiting()) || upstreamHPWaiting() {
+				atomic.AddInt64(&p.lpRefused, spanCount)
+				atomic.AddInt64(&p.lpRefusedBacklog, spanCount)
+				return td, status.Error(p.lpRefusal, "priority processor: LP refused while checkpoints or a backlog wait")
+			}
 			atomic.AddInt64(&p.lpAdmitted, spanCount)
 		} else {
 			atomic.AddInt64(&p.hpAdmitted, spanCount)
@@ -765,6 +893,171 @@ func isLPBatch(ctx context.Context) bool {
 }
 
 // ---------------------------------------------------------------------
+// Tomislav-RetCtx: margin modes and LP refusal code
+// ---------------------------------------------------------------------
+
+func marginMode(c *Config) string {
+	if c.USMarginMode == MarginModeBacklog {
+		return MarginModeBacklog
+	}
+	return MarginModeArrival
+}
+
+func lpRefusalCode(c *Config) codes.Code {
+	if c.LPRefusalCode == LPRefusalResourceExhausted {
+		// Non-retryable for the OTLP exporter when no RetryInfo is attached.
+		return codes.ResourceExhausted
+	}
+	return codes.Unavailable
+}
+
+// computeMargin returns the distance below soft at which LP shedding starts.
+//
+//	arrival: phaseAmp + cp * sizeGain * aggression * totalCommit * horizon   (v18)
+//	backlog: phaseAmp + cp * sizeGain * aggression * max(0, growth) * horizon
+//	         + totalCommit * reaction
+//
+// totalCommit and growth are heap bytes/s; horizon and reaction are seconds.
+// In backlog mode a pipeline that keeps up (flat post-GC troughs, growth 0)
+// reserves only the GC swing and a reaction window of arrivals.
+func computeMargin(mode string, phaseAmp, cpSafety, sizeGain, aggression, totalCommit, growth, horizonSec, reactionSec float64) float64 {
+	if mode == MarginModeBacklog {
+		return phaseAmp + cpSafety*sizeGain*aggression*math.Max(0, growth)*horizonSec + totalCommit*reactionSec
+	}
+	return phaseAmp + cpSafety*sizeGain*aggression*totalCommit*horizonSec
+}
+
+// recordTrough feeds one completed GC cycle's trough into the trough-slope EMA.
+func (p *priorityProcessor) recordTrough(trough uint64) {
+	now := p.now()
+	if p.troughInit {
+		if dt := now.Sub(p.troughPrevTime).Seconds(); dt > 0 {
+			slope := (float64(trough) - float64(p.troughPrev)) / dt
+			if p.troughSlopeInit {
+				p.troughSlopeEMA = troughSlopeAlpha*slope + (1-troughSlopeAlpha)*p.troughSlopeEMA
+			} else {
+				p.troughSlopeEMA = slope
+				p.troughSlopeInit = true
+			}
+		}
+	}
+	p.troughInit = true
+	p.troughPrev = trough
+	p.troughPrevTime = now
+}
+
+// backlogGrowth is the net live-heap growth estimate (bytes/s) for backlog
+// mode: the smoothed post-GC trough slope, or, if no GC cycle has completed
+// for troughStaleSec under load, the climb since the last trough.
+func (p *priorityProcessor) backlogGrowth(alloc uint64, idle bool) float64 {
+	if idle || !p.troughInit {
+		return 0
+	}
+	g := math.Max(0, p.troughSlopeEMA)
+	if since := p.now().Sub(p.troughPrevTime).Seconds(); since > troughStaleSec && alloc > p.troughPrev {
+		g = math.Max(g, float64(alloc-p.troughPrev)/since)
+	}
+	return g
+}
+
+// cpuSignal updates the 1s CPU-use window and reports whether it is at or above the
+// configured fraction of the quota. Off (false) when the threshold is 0 or no quota is known.
+func (p *priorityProcessor) cpuSignal() bool {
+	if p.config.CPUShedThreshold <= 0 || p.cpuQuota <= 0 || p.readCPU == nil {
+		return false
+	}
+	now := p.readCPU()
+	oldest := p.cpuRing[p.cpuIdx] // the reading cpuWindowTicks ticks ago
+	p.cpuRing[p.cpuIdx] = now
+	p.cpuIdx = (p.cpuIdx + 1) % len(p.cpuRing)
+	if p.cpuIdx == 0 {
+		p.cpuFilled = true
+	}
+	if !p.cpuFilled {
+		return false
+	}
+	window := float64(cpuWindowTicks) * p.config.CheckInterval.Seconds()
+	frac := (now - oldest) / (window * p.cpuQuota)
+	p.lastCPUFrac.Store(int64(frac * 1000))
+	p.cpuSaturated = frac >= p.config.CPUShedThreshold
+	return p.cpuSaturated
+}
+
+// gradedRecovery is the additive step towards full admission per window while below target,
+// so a fraction driven near zero by a burst climbs back even if CPU barely moves.
+const gradedRecovery = 0.05
+
+// updateGradedAdmission rescales the admitted LP fraction once per CPU window:
+// f <- clamp(f * target / cpu (+ gradedRecovery below target), 0, 1). Off when cpu_target is 0.
+// The CPU window is shared with the threshold signal (cpuSignal advances it each tick; when that
+// signal is off this advances it instead).
+func (p *priorityProcessor) updateGradedAdmission() {
+	if p.config.CPUTarget <= 0 || p.cpuQuota <= 0 || p.readCPU == nil {
+		gate.graded.Store(false)
+		return
+	}
+	if p.config.CPUShedThreshold <= 0 {
+		p.cpuSignalWindowOnly()
+	}
+	gate.graded.Store(true)
+	p.gradedTick++
+	if p.gradedTick%cpuWindowTicks == 0 && p.cpuFilled {
+		u := float64(p.lastCPUFrac.Load()) / 1000
+		f := p.lpAdmit
+		if u > 0 {
+			f *= p.config.CPUTarget / u
+		}
+		if u < p.config.CPUTarget {
+			f += gradedRecovery
+		}
+		p.lpAdmit = math.Max(0, math.Min(1, f))
+	}
+	gate.lpAdmitMicro.Store(int64(p.lpAdmit * fracScale))
+}
+
+// cpuSignalWindowOnly advances the CPU window without the threshold decision.
+func (p *priorityProcessor) cpuSignalWindowOnly() {
+	now := p.readCPU()
+	oldest := p.cpuRing[p.cpuIdx]
+	p.cpuRing[p.cpuIdx] = now
+	p.cpuIdx = (p.cpuIdx + 1) % len(p.cpuRing)
+	if p.cpuIdx == 0 {
+		p.cpuFilled = true
+	}
+	if p.cpuFilled {
+		window := float64(cpuWindowTicks) * p.config.CheckInterval.Seconds()
+		p.lastCPUFrac.Store(int64((now - oldest) / (window * p.cpuQuota) * 1000))
+	}
+}
+
+// processCPUSeconds is this process's cumulative user+system CPU time.
+func processCPUSeconds() float64 {
+	var ru syscall.Rusage
+	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &ru); err != nil {
+		return 0
+	}
+	return float64(ru.Utime.Sec+ru.Stime.Sec) + float64(ru.Utime.Usec+ru.Stime.Usec)/1e6
+}
+
+// cgroupCPUQuota is the cgroup v2 CPU limit in cores (cpu.max "quota period"), or 0.
+func cgroupCPUQuota() float64 {
+	data, err := os.ReadFile("/sys/fs/cgroup/cpu.max")
+	if err != nil {
+		return 0
+	}
+	f := strings.Fields(string(data))
+	if len(f) != 2 || f[0] == "max" {
+		return 0
+	}
+	q, err1 := strconv.ParseFloat(f[0], 64)
+	per, err2 := strconv.ParseFloat(f[1], 64)
+	if err1 != nil || err2 != nil || per <= 0 {
+		return 0
+	}
+	return q / per
+}
+
+// ---------------------------------------------------------------------
 // Metrics
 // ---------------------------------------------------------------------
 
@@ -780,7 +1073,7 @@ func (p *priorityProcessor) metricsLoop(ctx context.Context) {
 }
 
 func (p *priorityProcessor) logMetricsSnapshot(name string) {
-	alloc := p.readCurrentMemory()
+	alloc := p.readMem()
 	st := pressureState(p.state.Load())
 	f := float64(p.admitFracMicro.Load()) / float64(fracScale)
 	lpShare := float64(p.lastLPShareMilli.Load()) / 1000.0
@@ -800,7 +1093,17 @@ func (p *priorityProcessor) logMetricsSnapshot(name string) {
 		zap.Int64("lp_admitted", atomic.LoadInt64(&p.lpAdmitted)),
 		zap.Int64("hp_refused", atomic.LoadInt64(&p.hpRefused)),
 		zap.Int64("lp_refused", atomic.LoadInt64(&p.lpRefused)),
-		zap.Int64("gc_count", atomic.LoadInt64(&p.gcCount)))
+		zap.Int64("gc_count", atomic.LoadInt64(&p.gcCount)),
+		zap.Int64("growth_bps", p.lastGrowthBps.Load()),
+		zap.Int64("margin_bytes", p.lastMarginBytes.Load()),
+		zap.Float64("cpu_frac", float64(p.lastCPUFrac.Load())/1000),
+		zap.Float64("lp_admit_fraction", float64(gate.lpAdmitMicro.Load())/fracScale),
+		zap.Int64("predecode_refused_lp_requests", gate.refusedLP.Load()),
+		zap.Int64("predecode_refused_hp_requests", gate.refusedHP.Load()),
+		zap.Int64("hp_admitted_by_eviction", atomic.LoadInt64(&p.hpAdmittedByEviction)),
+		zap.Int64("lp_refused_queue_backlog", atomic.LoadInt64(&p.lpRefusedBacklog)),
+		zap.Int64("predecode_refused_lp_backlog_requests", gate.refusedLPBacklog.Load()),
+		zap.Int64("predecode_refused_lp_upstream_requests", gate.refusedLPUpstream.Load()))
 }
 
 // ---------------------------------------------------------------------

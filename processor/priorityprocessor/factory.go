@@ -39,6 +39,10 @@ func createDefaultConfig() component.Config {
 		ForceGC:             true,
 		GCSoftInterval:      1 * time.Second,
 		GCUltrasoftInterval: 2 * time.Second,
+		USMarginMode:        MarginModeArrival,
+		LPRefusalCode:       LPRefusalUnavailable,
+		Mode:                ModeAdmission,
+		DispatchWorkers:     10,
 	}
 }
 
@@ -55,6 +59,11 @@ func createTracesProcessor(
 
 	if err := processorConfig.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
+	}
+
+	// Tomislav-RetCtx: strict-priority queue stage (queue.go).
+	if processorConfig.Mode == ModeQueue {
+		return newPriorityQueue(processorConfig, set.Logger, nextConsumer), nil
 	}
 
 	proc, err := newProcessor(processorConfig, set.Logger, nextConsumer)

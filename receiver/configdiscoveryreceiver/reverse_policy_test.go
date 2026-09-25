@@ -10,7 +10,7 @@ import (
 // reject missing, nonfinite, or irrelevant probability values before rollout.
 func TestReversePolicyValidation(t *testing.T) {
 	valid := []map[string]interface{}{
-		nil, {"reverse_policy": "ttl"}, {"reverse_policy": "inverse_depth"}, {"reverse_policy": "depth_linear"},
+		nil, {"reverse_policy": "ttl"}, {"reverse_policy": "inverse_depth"}, {"reverse_policy": "depth_linear"}, {"reverse_policy": "depth_cubic"},
 		{"reverse_policy": "probability", "reverse_probability": 0},
 		{"reverse_policy": "probability", "reverse_probability": int64(1)},
 		{"reverse_policy": "probability", "reverse_probability": 0.25},
@@ -23,6 +23,7 @@ func TestReversePolicyValidation(t *testing.T) {
 		{"reverse_policy": "ttl", "reverse_probability": nil},
 		{"reverse_policy": "inverse_depth", "reverse_probability": 0.5},
 		{"reverse_policy": "depth_linear", "reverse_probability": 0.5},
+		{"reverse_policy": "depth_cubic", "reverse_probability": 0.5},
 	}
 	for _, value := range []interface{}{-1, 1.1, math.Inf(1), math.NaN(), "NaN", "bad", nil, true} {
 		invalid = append(invalid, map[string]interface{}{"reverse_policy": "probability", "reverse_probability": value})

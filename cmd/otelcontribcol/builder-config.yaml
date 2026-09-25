@@ -171,6 +171,9 @@ receivers:
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/receiver/cloudfoundryreceiver v0.139.0
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/receiver/collectdreceiver v0.139.0
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/receiver/configdiscoveryreceiver v0.139.0
+  # Tomislav-RetCtx: pre-decode admission receiver, shares the priority processor's gate (same module)
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/processor/priorityprocessor v0.139.0
+    import: github.com/open-telemetry/opentelemetry-collector-contrib/processor/priorityprocessor/priorityotlpreceiver
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/receiver/couchdbreceiver v0.139.0
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/receiver/datadogreceiver v0.139.0
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/receiver/dockerstatsreceiver v0.139.0
