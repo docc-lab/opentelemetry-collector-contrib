@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("C2\f000000000000")

@@ -1,0 +1,74 @@
+# Tomislav-RetCtx: the deployed agent pipeline (prepare_dsb_sn_nw.collector_config, admissionotel500m, backlog margin,
+# priorityotlp receiver, queue stage, no compression), with the sink as exporter endpoint and ports moved for the harness.
+receivers:
+  priorityotlp:
+    grpc:
+      endpoint: 0.0.0.0:14317
+      include_metadata: true
+processors:
+  batch:
+    send_batch_size: 8192
+    timeout: 200ms
+    metadata_keys:
+    - bridges-priority
+    metadata_cardinality_limit: 8
+  priority:
+    check_interval: 100ms
+    soft_percentage: 55
+    hard_percentage: 80
+    cp_safety_factor: 1
+    force_gc: true
+    gc_soft_interval: 1s
+    gc_ultrasoft_interval: 0s
+    us_margin_mode: backlog
+  priority/queue:
+    mode: queue
+    dispatch_workers: 10
+exporters:
+  otlp:
+    endpoint: 10.10.1.3:14317
+    tls:
+      insecure: true
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 0s
+    sending_queue:
+      enabled: false
+    auth:
+      authenticator: headers_setter
+    compression: none
+service:
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      level: detailed
+      readers:
+      - pull:
+          exporter:
+            prometheus:
+              host: 0.0.0.0
+              port: 18888
+  pipelines:
+    traces:
+      receivers:
+      - priorityotlp
+      processors:
+      - priority
+      - batch
+      - priority/queue
+      exporters:
+      - otlp
+  extensions:
+  - headers_setter
+extensions:
+  headers_setter:
+    headers:
+    - action: upsert
+      key: bridges-priority
+      from_context: bridges-priority
+    - action: upsert
+      key: bridges-hp-waiting
+      from_context: bridges-hp-waiting

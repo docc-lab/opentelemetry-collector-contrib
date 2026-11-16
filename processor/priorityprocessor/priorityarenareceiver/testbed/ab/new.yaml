@@ -1,0 +1,34 @@
+# Tomislav-RetCtx: the arena receiver in forward mode, for the same container (256 MiB, 0.5 CPU, GOMEMLIMIT 96MiB).
+receivers:
+  priorityarena:
+    grpc:
+      endpoint: 0.0.0.0:14317
+    memory_mib: 128
+    block_kib: 4
+    lp_limit_percentage: 90
+    workers: 10
+    max_batch_spans: 8192
+    max_batch_kib: 4096
+    forward:
+      endpoint: 10.10.1.3:14317
+      timeout: 5s
+exporters:
+  nop: {}
+service:
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      level: detailed
+      readers:
+      - pull:
+          exporter:
+            prometheus:
+              host: 0.0.0.0
+              port: 18888
+  pipelines:
+    traces:
+      receivers:
+      - priorityarena
+      exporters:
+      - nop
