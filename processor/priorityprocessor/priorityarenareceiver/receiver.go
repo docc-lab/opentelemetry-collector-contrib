@@ -24,6 +24,7 @@ import (
 	"go.opentelemetry.io/collector/consumer"
 	"go.opentelemetry.io/collector/receiver"
 	"go.opentelemetry.io/collector/receiver/receiverhelper"
+	"go.opentelemetry.io/otel/metric"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -69,6 +70,7 @@ type arenaReceiver struct {
 	lpCode codes.Code
 
 	store  *store
+	gauges metric.Registration
 	addr   net.Addr
 	server *grpc.Server
 	cc     *grpc.ClientConn
@@ -132,6 +134,9 @@ func (r *arenaReceiver) Start(ctx context.Context, host component.Host) error {
 		r.spawn(r.cfg.Workers, func() { p.run(wctx) })
 	}
 	r.spawn(1, func() { r.metricsLoop(wctx) })
+	if err := r.registerGauges(); err != nil {
+		r.set.Logger.Warn("priorityarena: gauges not registered", zap.Error(err))
+	}
 
 	r.set.Logger.Info("priorityarena receiver listening",
 		zap.String("endpoint", ln.Addr().String()),
@@ -172,6 +177,9 @@ func (r *arenaReceiver) Shutdown(context.Context) error {
 	}
 	if r.cc != nil {
 		_ = r.cc.Close()
+	}
+	if r.gauges != nil {
+		_ = r.gauges.Unregister()
 	}
 	if r.store == nil {
 		return nil
@@ -240,6 +248,30 @@ func exportHandler(srv any, ctx context.Context, dec func(any) error, intercepto
 }
 
 // metrics
+
+// registerGauges publishes the arena's state with the collector's own metrics (port 8888):
+// blocks in use (queued, in flight or being filled) and spans queued, per class. A drained
+// receiver has no blocks in use.
+func (r *arenaReceiver) registerGauges() error {
+	m := r.set.TelemetrySettings.MeterProvider.Meter("github.com/open-telemetry/opentelemetry-collector-contrib/processor/priorityprocessor/priorityarenareceiver")
+	used, err := m.Int64ObservableGauge("otelcol_priorityarena_blocks_used",
+		metric.WithDescription("Arena blocks in use: queued, in flight or being filled"))
+	if err != nil {
+		return err
+	}
+	queued, err := m.Int64ObservableGauge("otelcol_priorityarena_queued_spans",
+		metric.WithDescription("Spans queued in the arena"))
+	if err != nil {
+		return err
+	}
+	s := r.store
+	r.gauges, err = m.RegisterCallback(func(_ context.Context, o metric.Observer) error {
+		o.ObserveInt64(used, int64(s.used.Load()))
+		o.ObserveInt64(queued, s.c.hpQueuedSpans.Load()+s.c.lpQueuedSpans.Load())
+		return nil
+	}, used, queued)
+	return err
+}
 
 var runtimeSamples = []string{
 	"/gc/cycles/total:gc-cycles",
