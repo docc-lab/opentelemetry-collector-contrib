@@ -1,0 +1,31 @@
+# Tomislav-RetCtx: the arena receiver as deployed on the Social Network agents (2026-11-20): arena 70 % of the
+# container, LP refused at 50 % until the size ratio is known; sizeratio: a checkpoint band of 10 % x max(1, checkpoint/LP bytes per span). Forward mode.
+receivers:
+  priorityarena:
+    grpc:
+      endpoint: 0.0.0.0:14317
+    memory_percentage: 70
+    lp_percentage: 50
+    checkpoint_reserve_percentage: 10
+    forward:
+      endpoint: 10.10.1.3:14317
+exporters:
+  nop: {}
+service:
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      level: detailed
+      readers:
+      - pull:
+          exporter:
+            prometheus:
+              host: 0.0.0.0
+              port: 18888
+  pipelines:
+    traces:
+      receivers:
+      - priorityarena
+      exporters:
+      - nop

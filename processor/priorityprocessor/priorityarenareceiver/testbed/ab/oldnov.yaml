@@ -1,0 +1,71 @@
+# Tomislav-RetCtx: the agent pipeline of the Nov 6 Social Network campaign (snbd_campaign_chain.sh STACK:
+# admissionotel500m, backlog margin, no priorityotlp receiver, no queue stage, no compression), harness ports.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:14317
+        include_metadata: true
+processors:
+  batch:
+    send_batch_size: 8192
+    timeout: 200ms
+    metadata_keys:
+    - bridges-priority
+    metadata_cardinality_limit: 8
+  priority:
+    check_interval: 100ms
+    soft_percentage: 55
+    hard_percentage: 80
+    cp_safety_factor: 1
+    force_gc: true
+    gc_soft_interval: 1s
+    gc_ultrasoft_interval: 0s
+    us_margin_mode: backlog
+exporters:
+  otlp:
+    endpoint: 10.10.1.3:14317
+    tls:
+      insecure: true
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 0s
+    sending_queue:
+      enabled: true
+      num_consumers: 10
+      queue_size: 1000
+      block_on_overflow: false
+    auth:
+      authenticator: headers_setter
+    compression: none
+service:
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      level: detailed
+      readers:
+      - pull:
+          exporter:
+            prometheus:
+              host: 0.0.0.0
+              port: 18888
+  pipelines:
+    traces:
+      receivers:
+      - otlp
+      processors:
+      - priority
+      - batch
+      exporters:
+      - otlp
+  extensions:
+  - headers_setter
+extensions:
+  headers_setter:
+    headers:
+    - action: upsert
+      key: bridges-priority
+      from_context: bridges-priority

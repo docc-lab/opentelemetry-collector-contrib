@@ -19,6 +19,11 @@ IMAGE = 'registry.k8s.io/pause:3.9'
 ENV = {
     'old': {'GOMEMLIMIT': '230MiB'},   # the deployed agents' setting
     'new': {'GOMEMLIMIT': '96MiB'},    # 256 MiB minus the 128 MiB arena minus slack
+    'oldnov': {'GOMEMLIMIT': '230MiB'},  # the Nov 6 Social Network campaign's agents
+    # Tomislav-RetCtx (2026-11-20): fixed vs adaptive LP limit, as deployed (arena 70 % of the container)
+    'fixed': {'GOMEMLIMIT': '40MiB'},
+    'adaptive': {'GOMEMLIMIT': '40MiB'},   # the share-based limit (binary of 2026-11-20 06:3x, superseded)
+    'sizeratio': {'GOMEMLIMIT': '40MiB'},  # the band sized by the checkpoint/LP span size ratio
 }
 SCENARIOS = {
     # name: (load steps, sink capacity steps)
@@ -26,7 +31,11 @@ SCENARIOS = {
     'ramp':     ('30s:20000,30s:40000,30s:60000,30s:80000,30s:100000,30s:125000,30s:150000,30s:175000,30s:200000', '1h:inf'),
     'slowdown': ('210s:40000', '45s:inf,90s:24000,1h:inf'),
     'outage':   ('150s:40000', '45s:inf,20s:0,1h:inf'),
+    # Tomislav-RetCtx (2026-11-20): long enough to fill a 179 MiB arena; lpsurge adds an LP-only load (SURGE)
+    'outage60': ('180s:40000', '45s:inf,60s:0,1h:inf'),
+    'lpsurge':  ('210s:40000', '45s:inf,90s:24000,1h:inf'),
 }
+SURGE = {'lpsurge': '45s:0,90s:20000'}
 
 SAMPLER = r'''
 cid=$(docker inspect -f '{{.Id}}' prioab-agent); cg=/sys/fs/cgroup/system.slice/docker-$cid.scope
@@ -49,7 +58,7 @@ def ssh(node, cmd, check=True, timeout=None):
 def cleanup():
     ssh(AGENT, 'docker rm -f prioab-agent >/dev/null 2>&1; pkill -f prioab-sampler; true', check=False)
     ssh(SINK, 'docker rm -f prioab-sink >/dev/null 2>&1; true', check=False)
-    ssh(LOAD, 'docker rm -f prioab-load >/dev/null 2>&1; true', check=False)
+    ssh(LOAD, 'docker rm -f prioab-load prioab-surge >/dev/null 2>&1; true', check=False)
 
 
 def main():
@@ -80,11 +89,21 @@ def main():
     ssh(SINK, f'docker run -d --name prioab-sink --network host -v ~/prioab:/ab:ro --entrypoint /ab/sink {IMAGE} '
               f'-listen 0.0.0.0:14317 -capacity {sink_steps} -max-queue 1s')
     t0 = time.time()
+    surge = None
+    if args.scenario in SURGE:  # a second, LP-only load from another container on the load node
+        surge = subprocess.Popen(['ssh', '-o', 'BatchMode=yes', LOAD,
+                                  f'docker run --rm --name prioab-surge --network host --cpus 2 -v ~/prioab:/ab:ro '
+                                  f'--entrypoint /ab/load {IMAGE} -endpoint {AGENT_IP}:14317 -steps {SURGE[args.scenario]} '
+                                  f'-hp-fraction 0 -clients 8'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     load = ssh(LOAD, f'docker run --rm --name prioab-load --network host --cpus 6 -v ~/prioab:/ab:ro '
                      f'--entrypoint /ab/load {IMAGE} -endpoint {AGENT_IP}:14317 -steps {load_steps} '
                      f'-hp-fraction {args.hp_fraction} -clients 16', check=False)
     (out / 'load.jsonl').write_text(load.stdout)
     (out / 'load.stderr').write_text(load.stderr)
+    if surge:
+        so, se = surge.communicate(timeout=60)
+        (out / 'surge.jsonl').write_text(so)
+        (out / 'surge.stderr').write_text(se)
     time.sleep(args.drain)
     (out / 'agent.log').write_text(ssh(AGENT, 'docker logs prioab-agent 2>&1', check=False).stdout)
     state = ssh(AGENT, "docker inspect -f '{{json .State}}' prioab-agent", check=False).stdout
