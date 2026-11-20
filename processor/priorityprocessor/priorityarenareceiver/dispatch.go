@@ -138,6 +138,7 @@ func (p *pipeliner) dropUndecodable(b, bad *batch, chunks *[][]byte) {
 			e := &p.s.entries[id]
 			bad.ids = append(bad.ids, id)
 			bad.spans += int(e.spans)
+			bad.size += int(e.size)
 			p.logger.Warn("priorityarena: request does not decode, dropping", zap.Int("spans", int(e.spans)), zap.Error(err))
 			continue
 		}
@@ -145,6 +146,7 @@ func (p *pipeliner) dropUndecodable(b, bad *batch, chunks *[][]byte) {
 	}
 	b.ids = keep
 	b.spans -= bad.spans
+	b.size -= bad.size
 	if len(bad.ids) > 0 {
 		p.s.c.malformed.Add(int64(len(bad.ids)))
 		p.s.finish(bad, failed)

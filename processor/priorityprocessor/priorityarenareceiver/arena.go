@@ -7,12 +7,12 @@ package priorityarenareceiver // import "github.com/open-telemetry/opentelemetry
 // outside the Go heap and split into equal blocks; it never holds Go pointers, so the garbage
 // collector neither scans it nor counts it towards the heap. All bookkeeping is int32 indices.
 
-import (
-	"fmt"
-	"syscall"
-)
+import "fmt"
 
 const noBlock = -1
+
+// maxBlocks bounds the arena so that block and entry indices, counts and their sums stay int32.
+const maxBlocks = 1 << 30
 
 type arena struct {
 	mem       []byte
@@ -38,20 +38,17 @@ func newArena(size, blockSize int, useMmap bool) (*arena, error) {
 		return nil, fmt.Errorf("arena of %d bytes cannot hold a %d-byte block", size, blockSize)
 	}
 	n := size / blockSize
-	if n > 1<<30 {
+	if n > maxBlocks {
 		return nil, fmt.Errorf("arena of %d blocks is too large", n)
 	}
 	size = n * blockSize
 	a := &arena{blockSize: blockSize, nblocks: int32(n), next: make([]int32, n), slices: make([][]byte, n)}
 	if useMmap {
-		// MAP_POPULATE faults every page in now, so the container is charged for the arena once,
-		// at start, and never page-faults while receiving.
-		mem, err := syscall.Mmap(-1, 0, size, syscall.PROT_READ|syscall.PROT_WRITE,
-			syscall.MAP_ANON|syscall.MAP_PRIVATE|syscall.MAP_POPULATE)
+		mem, mapped, err := mapArena(size)
 		if err != nil {
-			return nil, fmt.Errorf("mmap %d bytes: %w", size, err)
+			return nil, err
 		}
-		a.mem, a.mapped = mem, true
+		a.mem, a.mapped = mem, mapped
 	} else {
 		a.mem = make([]byte, size)
 	}
@@ -68,18 +65,22 @@ func (a *arena) close() error {
 		return nil
 	}
 	a.mapped = false
-	return syscall.Munmap(a.mem)
+	return unmapArena(a.mem)
 }
 
-// blocksFor is the number of blocks size bytes need.
+// blocksFor is the number of blocks size bytes need, or nblocks+1 when they cannot fit the
+// arena at all (so the int32 count never overflows).
 func (a *arena) blocksFor(size int) int32 {
+	if size < 0 || size > int(a.nblocks)*a.blockSize {
+		return a.nblocks + 1
+	}
 	return int32((size + a.blockSize - 1) / a.blockSize)
 }
 
 // alloc takes n blocks off the free list and returns the first; the caller has checked a.free.
 func (a *arena) alloc(n int32) int32 {
 	if n <= 0 || n > a.free {
-		panic(fmt.Sprintf("arena: alloc %d blocks with %d free", n, a.free))
+		broken("alloc of %d blocks with %d free", n, a.free)
 	}
 	head := a.freeHead
 	last := head
@@ -94,12 +95,17 @@ func (a *arena) alloc(n int32) int32 {
 
 // release puts a chain of n blocks back on the free list.
 func (a *arena) release(head, n int32) {
+	if n <= 0 || n > a.nblocks-a.free || head < 0 || head >= a.nblocks {
+		broken("release of %d blocks from block %d with %d of %d free", n, head, a.free, a.nblocks)
+	}
 	last := head
 	for i := int32(1); i < n; i++ {
-		last = a.next[last]
+		if last = a.next[last]; last == noBlock {
+			broken("released chain is shorter than its %d blocks", n)
+		}
 	}
 	if a.next[last] != noBlock {
-		panic("arena: released chain is longer than its block count")
+		broken("released chain is longer than its %d blocks", n)
 	}
 	a.next[last] = a.freeHead
 	a.freeHead = head
@@ -120,6 +126,9 @@ func (a *arena) fill(head int32, src [][]byte) {
 		for len(s) > 0 {
 			if used == a.blockSize {
 				a.slices[blk] = dst[:used]
+				if a.next[blk] == noBlock {
+					broken("request overran the blocks reserved for it, at block %d", blk)
+				}
 				blk, dst, used = a.next[blk], a.block(a.next[blk]), 0
 			}
 			n := copy(dst[used:], s)

@@ -69,14 +69,15 @@ type arenaReceiver struct {
 	obs    *receiverhelper.ObsReport
 	lpCode codes.Code
 
-	store  *store
-	gauges metric.Registration
-	addr   net.Addr
-	server *grpc.Server
-	cc     *grpc.ClientConn
-	cancel context.CancelFunc
-	serve  sync.WaitGroup
-	work   sync.WaitGroup
+	store   *store
+	adapter *lpAdapter // nil when the LP limit is fixed
+	gauges  metric.Registration
+	addr    net.Addr
+	server  *grpc.Server
+	cc      *grpc.ClientConn
+	cancel  context.CancelFunc
+	serve   sync.WaitGroup
+	work    sync.WaitGroup
 }
 
 var serviceDesc = grpc.ServiceDesc{
@@ -87,15 +88,18 @@ var serviceDesc = grpc.ServiceDesc{
 }
 
 func (r *arenaReceiver) Start(ctx context.Context, host component.Host) error {
-	size, lpPct, err := r.cfg.sizing(containerMemoryLimit, r.set.Logger)
+	sz, err := r.cfg.sizing(memoryLimit, r.set.Logger)
 	if err != nil {
 		return err
 	}
-	a, err := newArena(size, r.cfg.BlockKiB<<10, r.cfg.Mmap)
+	a, err := newArena(sz.bytes, r.cfg.BlockKiB<<10, r.cfg.Mmap)
 	if err != nil {
 		return err
 	}
-	r.store = newStore(a, lpPct)
+	r.store = newStore(a, sz.lpPct)
+	if sz.bandPct > 0 {
+		r.adapter = newLPAdapter(r.store, float64(a.nblocks)*sz.bandPct/100, int(r.cfg.SizeWindow/adaptStep), r.set.Logger)
+	}
 
 	server, err := r.cfg.GRPC.ToServer(ctx, host, r.set.TelemetrySettings,
 		configgrpc.WithGrpcServerOption(grpc.ForceServerCodecV2(arenaCodec{})),
@@ -134,6 +138,9 @@ func (r *arenaReceiver) Start(ctx context.Context, host component.Host) error {
 		r.spawn(r.cfg.Workers, func() { p.run(wctx) })
 	}
 	r.spawn(1, func() { r.metricsLoop(wctx) })
+	if r.adapter != nil {
+		r.spawn(1, func() { r.adapter.run(wctx) })
+	}
 	if err := r.registerGauges(); err != nil {
 		r.set.Logger.Warn("priorityarena: gauges not registered", zap.Error(err))
 	}
@@ -141,7 +148,8 @@ func (r *arenaReceiver) Start(ctx context.Context, host component.Host) error {
 	r.set.Logger.Info("priorityarena receiver listening",
 		zap.String("endpoint", ln.Addr().String()),
 		zap.Int("arena_blocks", int(a.nblocks)), zap.Int("block_bytes", a.blockSize), zap.Bool("mmap", a.mapped),
-		zap.Int("lp_limit_blocks", int(r.store.lpLimit)), zap.String("forward", r.cfg.Forward.Endpoint),
+		zap.Int32("lp_limit_blocks", r.store.lpLimit.Load()), zap.Bool("lp_limit_adaptive", r.adapter != nil),
+		zap.String("forward", r.cfg.Forward.Endpoint),
 		zap.Int("workers", r.cfg.Workers))
 	r.serve.Add(1)
 	go func() {
@@ -250,8 +258,8 @@ func exportHandler(srv any, ctx context.Context, dec func(any) error, intercepto
 // metrics
 
 // registerGauges publishes the arena's state with the collector's own metrics (port 8888):
-// blocks in use (queued, in flight or being filled) and spans queued, per class. A drained
-// receiver has no blocks in use.
+// blocks in use (queued, in flight or being filled), spans queued, and the LP limit in force.
+// A drained receiver has no blocks in use.
 func (r *arenaReceiver) registerGauges() error {
 	m := r.set.TelemetrySettings.MeterProvider.Meter("github.com/open-telemetry/opentelemetry-collector-contrib/processor/priorityprocessor/priorityarenareceiver")
 	used, err := m.Int64ObservableGauge("otelcol_priorityarena_blocks_used",
@@ -264,12 +272,18 @@ func (r *arenaReceiver) registerGauges() error {
 	if err != nil {
 		return err
 	}
+	lpLimit, err := m.Int64ObservableGauge("otelcol_priorityarena_lp_limit_blocks",
+		metric.WithDescription("Arena blocks in use up to which LP is admitted"))
+	if err != nil {
+		return err
+	}
 	s := r.store
 	r.gauges, err = m.RegisterCallback(func(_ context.Context, o metric.Observer) error {
 		o.ObserveInt64(used, int64(s.used.Load()))
 		o.ObserveInt64(queued, s.c.hpQueuedSpans.Load()+s.c.lpQueuedSpans.Load())
+		o.ObserveInt64(lpLimit, int64(s.lpLimit.Load()))
 		return nil
-	}, used, queued)
+	}, used, queued, lpLimit)
 	return err
 }
 
@@ -311,9 +325,17 @@ func (r *arenaReceiver) logMetrics(name string) {
 		}
 		return zap.Skip()
 	}
+	ratio := zap.Skip()
+	if r.adapter != nil {
+		ratio = zap.Float64("size_ratio", r.adapter.ratioNow()) // NaN until the first window
+	}
 	r.set.Logger.Info(name,
 		zap.Int64("hp_admitted", c.hpAdmitted.Load()),
 		zap.Int64("lp_admitted", c.lpAdmitted.Load()),
+		zap.Int64("hp_admitted_bytes", c.hpAdmittedB.Load()),
+		zap.Int64("lp_admitted_bytes", c.lpAdmittedB.Load()),
+		zap.Int64("hp_admitted_blocks", c.hpAdmittedBlk.Load()),
+		zap.Int64("lp_admitted_blocks", c.lpAdmittedBlk.Load()),
 		zap.Int64("hp_refused", c.hpRefused.Load()),
 		zap.Int64("lp_refused", c.lpRefused.Load()),
 		zap.Int64("hp_refused_requests_predecode", c.hpRefusedReq.Load()),
@@ -337,6 +359,9 @@ func (r *arenaReceiver) logMetrics(name string) {
 		zap.Int32("blocks_used", s.used.Load()),
 		zap.Int32("blocks_used_max", s.usedMax.Load()),
 		zap.Int32("blocks_total", s.a.nblocks),
+		zap.Int32("lp_used_blocks", s.lpUsedA.Load()),
+		zap.Int32("lp_limit_blocks", s.lpLimit.Load()),
+		ratio,
 		zap.Int("block_bytes", s.a.blockSize),
 		rt(0), rt(1), rt(2), rt(3), rt(4))
 }

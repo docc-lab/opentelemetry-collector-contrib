@@ -7,7 +7,8 @@ package priorityarenareceiver // import "github.com/open-telemetry/opentelemetry
 // two FIFOs: checkpoints (HP) and the rest (LP). Admission is decided per request on exact
 // block counts:
 //
-//   - LP is admitted while the blocks in use stay within the LP limit.
+//   - LP is admitted while the blocks in use, of either class, stay within the LP limit. It is
+//     fixed (lp_percentage), or moved with the checkpoint/LP span size ratio (adapt.go).
 //   - HP is admitted if there are free blocks; otherwise the newest queued LP is evicted until
 //     there are. HP is refused only when no queued LP is left to evict.
 //
@@ -20,6 +21,7 @@ package priorityarenareceiver // import "github.com/open-telemetry/opentelemetry
 import (
 	"context"
 	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -68,7 +70,8 @@ type store struct {
 	owner   []int32        // per block: the entry it belongs to
 	slots   []int32        // free entry slots
 	hp, lp  fifo
-	lpLimit int32 // blocks in use up to which LP is admitted
+	lpLimit atomic.Int32 // blocks in use, of either class, up to which LP is admitted
+	lpUsed  int32        // blocks LP entries hold (being filled, queued, in flight or dead), for the metrics
 	start   time.Time
 
 	flights     []*flight  // sends holding LP, oldest first
@@ -80,6 +83,7 @@ type store struct {
 
 	// read without the lock by the pre-decode check and the metrics line
 	used        atomic.Int32
+	lpUsedA     atomic.Int32 // lpUsed
 	lpQueuedBlk atomic.Int32
 	lpFlightA   atomic.Int32 // lpFlightBlk
 	usedMax     atomic.Int32
@@ -102,15 +106,18 @@ type counters struct {
 	sends, sendErrors              atomic.Int64 // forward RPCs / pipeline batches
 	hpQueuedSpans, lpQueuedSpans   atomic.Int64
 	hpQueuedBlocks, lpQueuedBlocks atomic.Int64
+	hpAdmittedBlk, lpAdmittedBlk   atomic.Int64 // blocks of admitted requests
+	hpAdmittedB, lpAdmittedB       atomic.Int64 // bytes of admitted requests
 }
 
+// newStore makes a store whose LP limit is lpLimitPct percent of the arena.
 func newStore(a *arena, lpLimitPct float64) *store {
 	n := a.nblocks
 	s := &store{
 		a: a, entries: make([]entry, n), lent: make([]atomic.Int32, n), owner: make([]int32, n),
-		slots: make([]int32, n), lpLimit: int32(float64(n) * lpLimitPct / 100),
-		start: time.Now(), wake: make(chan struct{}, 1),
+		slots: make([]int32, n), start: time.Now(), wake: make(chan struct{}, 1),
 	}
+	s.lpLimit.Store(int32(float64(n) * lpLimitPct / 100))
 	for i := range s.slots {
 		s.slots[i] = n - 1 - int32(i)
 	}
@@ -139,7 +146,9 @@ func (s *store) notify() {
 }
 
 // refuseLPEarly and refuseHPEarly are the pre-decode checks, from the gauges alone.
-func (s *store) refuseLPEarly() bool { return s.used.Load() >= s.lpLimit }
+func (s *store) refuseLPEarly() bool {
+	return s.used.Load() >= s.lpLimit.Load()
+}
 
 func (s *store) refuseHPEarly() bool {
 	return s.used.Load() >= s.a.nblocks && s.lpQueuedBlk.Load() == 0 && s.lpFlightA.Load() == 0
@@ -148,16 +157,19 @@ func (s *store) refuseHPEarly() bool {
 // reserve admits a request of size bytes and spans spans, or says why not. On admission it
 // returns an entry in the filling state, holding enough blocks for the request.
 func (s *store) reserve(hp bool, size, spans int) (id, head int32, code codes.Code, msg string) {
+	if size <= 0 || spans <= 0 {
+		broken("reserve of %d bytes holding %d spans", size, spans)
+	}
 	need := s.a.blocksFor(size)
-	if need > s.a.nblocks {
+	if need > s.a.nblocks || size > math.MaxInt32 || spans > math.MaxInt32 { // entries record both as int32
 		s.refused(hp, spans)
-		return noEntry, noBlock, codes.ResourceExhausted, fmt.Sprintf("request of %d bytes is larger than the arena", size)
+		return noEntry, noBlock, codes.ResourceExhausted, fmt.Sprintf("request of %d bytes (%d spans) does not fit the arena", size, spans)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	used := s.a.nblocks - s.a.free
 	if !hp {
-		if used+need > s.lpLimit {
+		if used+need > s.lpLimit.Load() {
 			s.refused(false, spans)
 			return noEntry, noBlock, codes.ResourceExhausted, "priorityarena: LP limit reached"
 		}
@@ -172,9 +184,15 @@ func (s *store) reserve(hp bool, size, spans int) (id, head int32, code codes.Co
 		}
 		s.c.hpByEviction.Add(int64(spans))
 	}
+	if len(s.slots) == 0 { // every entry holds at least one block, so there is a slot per free block
+		broken("no free entry slot with %d blocks free", s.a.free)
+	}
 	id = s.slots[len(s.slots)-1]
 	s.slots = s.slots[:len(s.slots)-1]
 	head = s.a.alloc(need)
+	if !hp {
+		s.lpUsed += need
+	}
 	for blk := head; blk != noBlock; blk = s.a.next[blk] {
 		s.owner[blk] = id
 	}
@@ -196,13 +214,20 @@ func (s *store) refused(hp bool, spans int) {
 func (s *store) commit(id int32) {
 	s.mu.Lock()
 	e := &s.entries[id]
+	if e.state != entryFilling {
+		broken("entry %d committed in state %d", id, e.state)
+	}
 	e.state, e.queued = entryQueued, s.now()
 	if e.hp {
 		s.pushBack(&s.hp, id)
 		s.c.hpAdmitted.Add(int64(e.spans))
+		s.c.hpAdmittedBlk.Add(int64(e.nblocks))
+		s.c.hpAdmittedB.Add(int64(e.size))
 	} else {
 		s.pushBack(&s.lp, id)
 		s.c.lpAdmitted.Add(int64(e.spans))
+		s.c.lpAdmittedBlk.Add(int64(e.nblocks))
+		s.c.lpAdmittedB.Add(int64(e.size))
 	}
 	s.mu.Unlock()
 	s.notify()
@@ -275,7 +300,15 @@ func (s *store) drop(id int32) {
 
 func (s *store) free(id int32) {
 	e := &s.entries[id]
+	if e.state == entryFree {
+		broken("entry %d freed twice", id)
+	}
 	s.a.release(e.head, e.nblocks)
+	if !e.hp {
+		if s.lpUsed -= e.nblocks; s.lpUsed < 0 {
+			broken("LP holds %d blocks", s.lpUsed)
+		}
+	}
 	*e = entry{prev: noEntry, next: noEntry}
 	s.slots = append(s.slots, id)
 	s.setUsed()
@@ -285,6 +318,7 @@ func (s *store) free(id int32) {
 func (s *store) setUsed() {
 	used := s.a.nblocks - s.a.free
 	s.used.Store(used)
+	s.lpUsedA.Store(s.lpUsed)
 	if used > s.usedMax.Load() {
 		s.usedMax.Store(used)
 	}
@@ -341,6 +375,9 @@ func (s *store) counted(f *fifo, id int32, sign int32) {
 	f.entries += sign
 	f.blocks += sign * e.nblocks
 	f.spans += int64(sign) * int64(e.spans)
+	if f.entries < 0 || f.blocks < 0 || f.spans < 0 {
+		broken("queue totals %d entries, %d blocks, %d spans", f.entries, f.blocks, f.spans)
+	}
 	s.setUsed()
 }
 
@@ -494,7 +531,9 @@ func (s *store) finish(b *batch, o outcome) {
 			}
 		}
 		if !f.evicted {
-			s.lpFlightBlk -= f.lpBlocks
+			if s.lpFlightBlk -= f.lpBlocks; s.lpFlightBlk < 0 {
+				broken("%d LP blocks in flight", s.lpFlightBlk)
+			}
 		}
 		evicted, b.f = f.evicted, nil
 		s.setUsed()
@@ -502,6 +541,9 @@ func (s *store) finish(b *batch, o outcome) {
 	for i := len(b.ids) - 1; i >= 0; i-- { // backwards, so a requeued batch keeps its order
 		id := b.ids[i]
 		e := &s.entries[id]
+		if e.state != entryInflight {
+			broken("entry %d settled in state %d", id, e.state)
+		}
 		if evicted && !e.hp && o != sent { // evicted for a checkpoint while in flight
 			s.c.lpEvicted.Add(int64(e.spans))
 			s.c.lpEvictedReq.Add(1)
@@ -550,6 +592,9 @@ func (s *store) lend(b *batch) mem.BufferSlice {
 	out := make(mem.BufferSlice, 0, n)
 	for _, id := range b.ids {
 		e := &s.entries[id]
+		if e.state != entryInflight {
+			broken("entry %d lent in state %d", id, e.state)
+		}
 		s.lent[id].Add(e.nblocks)
 		for blk := e.head; blk != noBlock; blk = s.a.next[blk] {
 			out = append(out, mem.NewBuffer(&s.a.slices[blk], s))
@@ -572,7 +617,11 @@ func (s *store) Put(p *[]byte) {
 		panic("priorityarena: gRPC returned a buffer that is not an arena block")
 	}
 	id := s.owner[blk]
-	if s.lent[id].Add(-1) > 0 {
+	n := s.lent[id].Add(-1)
+	if n < 0 {
+		broken("entry %d: more blocks returned than lent", id)
+	}
+	if n > 0 {
 		return
 	}
 	s.mu.Lock()
@@ -607,13 +656,16 @@ func (s *store) check() error {
 	if nfree != s.a.free {
 		return fmt.Errorf("free list holds %d blocks, counter says %d", nfree, s.a.free)
 	}
-	live := int32(0)
+	live, lpUsed := int32(0), int32(0)
 	for id := range s.entries {
 		e := &s.entries[id]
 		if e.state == entryFree {
 			continue
 		}
 		live++
+		if !e.hp {
+			lpUsed += e.nblocks
+		}
 		n := int32(0)
 		for blk := e.head; blk != noBlock; blk = s.a.next[blk] {
 			if seen[blk] {
@@ -633,6 +685,9 @@ func (s *store) check() error {
 		if !ok {
 			return fmt.Errorf("block %d leaked", blk)
 		}
+	}
+	if lpUsed != s.lpUsed {
+		return fmt.Errorf("LP entries hold %d blocks, counter says %d", lpUsed, s.lpUsed)
 	}
 	if int(live)+len(s.slots) != len(s.entries) {
 		return fmt.Errorf("%d live entries and %d free slots, %d slots in all", live, len(s.slots), len(s.entries))

@@ -5,6 +5,7 @@ package priorityarenareceiver // import "github.com/open-telemetry/opentelemetry
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
 	"go.opentelemetry.io/collector/component"
@@ -31,6 +32,15 @@ type Config struct {
 	// LPPercentage, with MemoryPercentage, is the share of the container's memory limit the
 	// arena may fill before LP is refused. It replaces LPLimitPercentage.
 	LPPercentage int `mapstructure:"lp_percentage"`
+	// CheckpointReservePercentage, with MemoryPercentage, makes the LP limit adaptive: the top of
+	// the arena, this share of the container's memory limit scaled by the checkpoint/LP span size
+	// ratio (never less than the reserve), is for checkpoints alone, and LP is refused below it.
+	// Until the ratio is known, the limit is LPPercentage, or the reserve's lower edge if
+	// LPPercentage is not set.
+	CheckpointReservePercentage int `mapstructure:"checkpoint_reserve_percentage"`
+	// SizeWindow is how much traffic the span sizes are averaged over: seconds that admitted
+	// something.
+	SizeWindow time.Duration `mapstructure:"size_window"`
 	// BlockKiB is the arena's allocation unit; each request uses whole blocks. At least 4.
 	BlockKiB int `mapstructure:"block_kib"`
 	// LPLimitPercentage is the share of blocks LP may fill; the rest is kept for checkpoints,
@@ -84,6 +94,7 @@ func createDefaultConfig() component.Config {
 		MaxBatchSpans:     8192,
 		MaxBatchKiB:       4096,
 		MetricsInterval:   time.Second,
+		SizeWindow:        30 * time.Second,
 		Forward: ForwardConfig{
 			Timeout: 5 * time.Second, BackoffInitial: 50 * time.Millisecond, BackoffMax: time.Second,
 		},
@@ -92,16 +103,25 @@ func createDefaultConfig() component.Config {
 
 func (c *Config) Validate() error {
 	switch {
-	case c.BlockKiB < 4:
-		return errors.New("block_kib must be at least 4")
+	case c.BlockKiB < 4 || c.BlockKiB > 1024:
+		return errors.New("block_kib must be between 4 and 1024")
 	case c.MemoryPercentage == 0 && (c.MemoryMiB <= 0 || c.MemoryMiB<<20 < c.BlockKiB<<10):
 		return errors.New("memory_mib must hold at least one block")
+	case c.MemoryPercentage == 0 && int64(c.MemoryMiB)<<10/int64(c.BlockKiB) > maxBlocks:
+		return fmt.Errorf("memory_mib must not exceed %d blocks", maxBlocks)
 	case c.LPLimitPercentage < 0 || c.LPLimitPercentage > 100:
 		return errors.New("lp_limit_percentage must be between 0 and 100")
-	case c.MemoryPercentage < 0 || c.MemoryPercentage > 100:
-		return errors.New("memory_percentage must be between 0 (use memory_mib) and 100")
+	case c.MemoryPercentage < 0 || c.MemoryPercentage >= 100:
+		return errors.New("memory_percentage must be between 0 (use memory_mib) and 99: the rest of the process needs memory too")
 	case c.LPPercentage != 0 && (c.MemoryPercentage == 0 || c.LPPercentage < 0 || c.LPPercentage > c.MemoryPercentage):
 		return errors.New("lp_percentage needs memory_percentage, and must not exceed it")
+	case c.CheckpointReservePercentage < 0 || c.CheckpointReservePercentage > 0 &&
+		(c.MemoryPercentage == 0 || c.CheckpointReservePercentage >= c.MemoryPercentage):
+		return errors.New("checkpoint_reserve_percentage needs memory_percentage, and must be below it")
+	case c.CheckpointReservePercentage > 0 && c.LPPercentage > c.MemoryPercentage-c.CheckpointReservePercentage:
+		return errors.New("lp_percentage must not reach into checkpoint_reserve_percentage")
+	case c.CheckpointReservePercentage > 0 && (c.SizeWindow < adaptStep || c.SizeWindow > time.Hour):
+		return fmt.Errorf("size_window must be between %v and 1h", adaptStep)
 	case c.LPRefusalCode != LPRefusalResourceExhausted && c.LPRefusalCode != LPRefusalUnavailable:
 		return errors.New(`lp_refusal_code must be "resource_exhausted" or "unavailable"`)
 	case c.Workers < 1:

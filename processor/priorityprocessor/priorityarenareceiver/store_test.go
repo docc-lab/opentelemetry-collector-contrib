@@ -245,6 +245,9 @@ func TestStoreRandom(t *testing.T) {
 		held     []mem.BufferSlice
 	)
 	for step := 0; step < 20000; step++ {
+		if step%500 == 0 { // the adaptive LP limit moving under load
+			s.lpLimit.Store(int32(r.Intn(64) + 1))
+		}
 		switch op := r.Intn(10); {
 		case op < 5:
 			hp := r.Intn(3) == 0
@@ -261,6 +264,9 @@ func TestStoreRandom(t *testing.T) {
 			_, code := put(t, s, hp, blocks)
 			if hp && code != codes.OK {
 				require.Less(t, room, int32(blocks), "checkpoint refused though free and queued LP blocks covered it")
+			}
+			if !hp && code == codes.OK {
+				require.LessOrEqual(t, s.used.Load(), s.lpLimit.Load(), "LP admitted over its limit")
 			}
 		case op < 7:
 			var b batch
@@ -318,15 +324,16 @@ func TestSizingFromContainerLimit(t *testing.T) {
 	c := createDefaultConfig().(*Config)
 	c.MemoryPercentage, c.LPPercentage = 70, 50
 	require.NoError(t, c.Validate())
-	size, lpPct, err := c.sizing(func() (uint64, error) { return 256 << 20, nil }, zap.NewNop())
+	sz, err := c.sizing(func() (uint64, error) { return 256 << 20, nil }, zap.NewNop())
 	require.NoError(t, err)
-	require.Equal(t, int(256<<20)*70/100, size)
-	require.InDelta(t, 100*50.0/70, lpPct, 1e-9)
-	a, err := newArena(size, testBlock, false)
+	require.Equal(t, int(256<<20)*70/100, sz.bytes)
+	require.InDelta(t, 100*50.0/70, sz.lpPct, 1e-9)
+	require.Zero(t, sz.bandPct)
+	a, err := newArena(sz.bytes, testBlock, false)
 	require.NoError(t, err)
-	s := newStore(a, lpPct)
+	s := newStore(a, sz.lpPct)
 	// LP stops at 50 % of the container, checkpoints at 70 %
-	require.InDelta(t, float64(256<<20)/2, float64(s.lpLimit)*testBlock, testBlock)
+	require.InDelta(t, float64(256<<20)/2, float64(s.lpLimit.Load())*testBlock, testBlock)
 	require.InDelta(t, float64(256<<20)*0.7, float64(s.a.nblocks)*testBlock, testBlock)
 
 	c.LPPercentage = 80

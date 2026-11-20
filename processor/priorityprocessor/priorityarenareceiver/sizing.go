@@ -18,19 +18,34 @@ import (
 	"go.uber.org/zap"
 )
 
-// sizing returns the arena's size in bytes and the share of it LP may fill, in percent.
-func (c *Config) sizing(limit func() (uint64, error), logger *zap.Logger) (int, float64, error) {
+// memoryLimit reads the container's memory limit; tests replace it.
+var memoryLimit = containerMemoryLimit
+
+// arenaSizing is the arena's size and how much of it LP may use, in percent of it.
+type arenaSizing struct {
+	bytes   int
+	lpPct   float64 // the LP limit: blocks in use, of either class, up to which LP is admitted (adaptive: at start)
+	bandPct float64 // adaptive: the checkpoint band at a size ratio of 1 or less (the reserve); 0 for a fixed limit
+}
+
+// sizing returns the arena's size, the LP limit and the checkpoint reserve.
+func (c *Config) sizing(limit func() (uint64, error), logger *zap.Logger) (arenaSizing, error) {
 	if c.MemoryPercentage == 0 {
-		return c.MemoryMiB << 20, float64(c.LPLimitPercentage), nil
+		return arenaSizing{bytes: c.MemoryMiB << 20, lpPct: float64(c.LPLimitPercentage)}, nil
 	}
 	total, err := limit()
 	if err != nil {
-		return 0, 0, fmt.Errorf("memory_percentage needs the container's memory limit: %w", err)
+		return arenaSizing{}, fmt.Errorf("memory_percentage needs the container's memory limit: %w", err)
 	}
 	size := int(total * uint64(c.MemoryPercentage) / 100)
-	lpPct := 100.0
+	pct := func(p int) float64 { return 100 * float64(p) / float64(c.MemoryPercentage) }
+	sz := arenaSizing{bytes: size, lpPct: 100}
+	if c.CheckpointReservePercentage != 0 {
+		sz.bandPct = pct(c.CheckpointReservePercentage)
+		sz.lpPct = 100 - sz.bandPct
+	}
 	if c.LPPercentage != 0 {
-		lpPct = 100 * float64(c.LPPercentage) / float64(c.MemoryPercentage)
+		sz.lpPct = pct(c.LPPercentage)
 	}
 	rest := int64(total) - int64(size)
 	if gml := debug.SetMemoryLimit(-1); gml != math.MaxInt64 && gml > rest {
@@ -39,8 +54,9 @@ func (c *Config) sizing(limit func() (uint64, error), logger *zap.Logger) (int, 
 	}
 	logger.Info("priorityarena sized from the container's memory limit",
 		zap.Uint64("container_limit_bytes", total), zap.Int("memory_percentage", c.MemoryPercentage),
-		zap.Int("lp_percentage", c.LPPercentage), zap.Int("arena_bytes", size))
-	return size, lpPct, nil
+		zap.Int("lp_percentage", c.LPPercentage), zap.Int("checkpoint_reserve_percentage", c.CheckpointReservePercentage),
+		zap.Int("arena_bytes", size))
+	return sz, nil
 }
 
 // containerMemoryLimit is the cgroup (v2, then v1) memory limit of this process.
