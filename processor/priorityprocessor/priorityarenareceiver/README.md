@@ -1,59 +1,63 @@
 # Priority arena receiver
 
-Tomislav-RetCtx: an OTLP/gRPC trace receiver that buffers every request in a fixed memory
-arena outside the Go heap, decides admission by exact byte counts, and sends checkpoints
-first. It replaces the `priorityotlp` → `priority` → `batch` → `priority/queue` pipeline.
+| Status | |
+|---|---|
+| Stability | development: traces |
+| Component type | receiver (`priorityarena`) |
 
-## Why
+An OTLP/gRPC trace receiver for collectors that carry two classes of spans: **checkpoints**, which
+must not be lost, and ordinary spans (**LP**, low priority), which may be shed under pressure. The
+sender marks each request with a `bridges-priority: hp` (checkpoints) or `bridges-priority: lp`
+gRPC header.
 
-The `priority` processor decides from `runtime.MemStats.Alloc`, which includes garbage the GC
-has not collected yet. With `GOGC=100` the heap climbs to about twice the live heap before every
-collection, so the processor sheds LP, and at the soft line refuses checkpoints, on garbage
-rather than on data it holds. It then forces GCs to bring the reading down. Every admitted
-request is also decoded into pdata, a graph of small objects per span that becomes garbage once
-the request is sent.
+The receiver holds every buffered request as raw bytes in one fixed arena outside the Go heap. It
+decides admission per request on exact byte counts, sends checkpoints first, and makes room for
+checkpoints by evicting LP. Nothing after it in the pipeline should queue.
 
-This receiver never decodes requests on the forwarding path and holds them as bytes in memory
-it manages itself. The Go heap then holds little more than gRPC's per-request state.
+![Design of the priority arena receiver](docs/design.svg)
+
+[DESIGN.md](DESIGN.md) explains the design and how it differs from the `priority` processor
+pipeline it replaces, with measurements.
 
 ## How it works
 
-* **Arena.** One region of `memory_mib`, mapped with `mmap` (`MAP_POPULATE`, so it is charged to
-  the container once, at start) and split into `block_kib` blocks. A request occupies a chain of
-  whole blocks. Bookkeeping is int32 arrays, so the GC neither scans nor counts any of it.
-* **Admission**, per request, from the `bridges-priority: hp|lp` header the bridges SDK sets:
-  * LP is admitted while the blocks in use stay within `lp_limit_percentage` of the arena.
-  * A checkpoint (HP) is admitted if there are free blocks. Otherwise the **newest** queued LP
-    requests are evicted until there are. If queued LP is not enough, LP being sent is evicted
-    too, newest send first: the send is cancelled, its requests are dropped instead of
-    requeued, and the checkpoint waits up to 500 ms for gRPC to hand back the blocks. A
-    checkpoint is refused only when evicting all LP, queued and in flight, would still not
-    make room.
-
-  Evicted blocks are free at once, so nothing is evicted beyond what a checkpoint needs. Newest
-  first keeps the oldest LP, the part of traces furthest along, intact.
-* **Before reading.** A gRPC tap refuses a request from its headers alone when its class is
-  already over its limit, so a refused request is never read or copied.
-* **Counting.** A wire scan counts the request's spans and checks its structure (lengths, wire
-  types, nesting down to the spans) without allocating. Malformed requests are refused with
+* **Arena.** One region of `memory_mib` (or `memory_percentage` of the container's memory limit),
+  mapped with `mmap` and `MAP_POPULATE`, so it is charged to the container once, at start. It is
+  split into `block_kib` blocks. A request takes a chain of whole blocks, and all bookkeeping is
+  int32 arrays the garbage collector never scans.
+* **Before reading.** A gRPC tap refuses a request from its headers alone when its class is already
+  over its limit, so a refused request is never read or copied.
+* **Counting.** A wire scan counts the request's spans and checks its structure (lengths, wire types,
+  nesting down to the spans) without allocating. Malformed requests are refused with
   `InvalidArgument`.
-* **Dispatch.** `workers` goroutines take queued requests, checkpoints first, concatenating
-  them up to `max_batch_spans` / `max_batch_kib` (concatenated OTLP requests are one valid
-  request). LP is not sent while a checkpoint waits.
-  * **Forward mode** (`forward.endpoint` set) sends the bytes to the next OTLP/gRPC server
-    as they are, one class per send, with the `bridges-priority` header. gRPC gets the arena
-    blocks themselves; they are released when gRPC hands them back. The pipeline's consumer
-    is not used.
-  * **Pipeline mode** decodes each batch (checkpoints, then LP) and calls the pipeline. Nothing
-    after the receiver should queue: no `batch` processor, exporter `sending_queue` disabled.
-    A batch that does not decode is retried request by request, and only the bad ones are dropped.
-* **Failures.** A batch stays in the arena until it is delivered. On a retryable error it goes
-  back to the front of its queue, and sends pause for a backoff that doubles from
-  `forward.backoff_initial` to `forward.backoff_max`. A refused checkpoint pauses every send,
-  a refused LP request only LP. While back in the queue it can be evicted like any other LP.
+* **Admission**, per request, on the blocks it needs:
+  * LP is admitted while the blocks in use, plus its own, stay within the LP limit.
+  * A checkpoint is admitted into free blocks. If there are not enough, the newest queued LP
+    requests are evicted until there are. If queued LP is not enough, LP being sent is evicted too:
+    its send is cancelled and the checkpoint waits up to 500 ms for gRPC to hand the blocks back. A
+    checkpoint is refused only when evicting all LP would still not make room.
+* **LP limit.** Either fixed (`lp_percentage`, or `lp_limit_percentage` of the arena), or set from
+  the span sizes with `checkpoint_reserve_percentage`. In that case the top of the arena is a band
+  for checkpoints alone, of reserve × max(1, r), where r is the checkpoint bytes per span ÷ the LP
+  bytes per span of the requests admitted over the last `size_window`. The band then holds about as
+  many checkpoint spans as the reserve would hold LP spans. Moving the limit never evicts anything:
+  LP above a lowered limit drains, and only new LP is refused.
+* **Dispatch.** `workers` goroutines take queued requests, checkpoints first, and concatenate them up
+  to `max_batch_spans` / `max_batch_kib` (concatenated OTLP requests form one valid request). LP is
+  not sent while a checkpoint waits.
+  * **Forward mode** (`forward.endpoint` set) sends the bytes to the next OTLP/gRPC server as they
+    are, one class per send, with the `bridges-priority` header. gRPC reads the arena blocks
+    directly. The pipeline's consumer is not used; give the pipeline a `nop` exporter.
+  * **Pipeline mode** decodes each batch (checkpoints, then LP) and calls the pipeline. Turn off the
+    exporter's `sending_queue` and use no `batch` processor. A batch that does not decode is retried
+    request by request, and only the bad requests are dropped.
+* **Failures.** A request stays in the arena until it is delivered. After a retryable error it goes
+  back to the front of its queue and sends pause, with a backoff that doubles from
+  `forward.backoff_initial` to `forward.backoff_max`. A refused checkpoint pauses every send, a
+  refused LP request only LP.
 
-Refusal codes: LP gets `lp_refusal_code` (default `ResourceExhausted`, which the OTLP exporter
-does not retry), checkpoints `Unavailable` (retried).
+LP is refused with `lp_refusal_code` (default `ResourceExhausted`, which the OTLP exporter does not
+retry). Checkpoints are refused with `Unavailable`, which it retries.
 
 ## Configuration
 
@@ -61,10 +65,12 @@ does not retry), checkpoints `Unavailable` (retried).
 |---|---|---|
 | `grpc` | `0.0.0.0:4317` | gRPC server settings, as for the OTLP receiver |
 | `memory_mib` | 128 | Arena size. It is not Go heap: leave it out of `GOMEMLIMIT` |
-| `memory_percentage` | 0 | Size the arena as this share of the container's memory limit (cgroup) instead. Checkpoints are refused above it, once no LP is left |
-| `lp_percentage` | 0 | With `memory_percentage`: the share of the container's limit the arena may fill before LP is refused. Replaces `lp_limit_percentage` |
-| `block_kib` | 4 | Allocation unit, at least 4. A request wastes half a block on average |
-| `lp_limit_percentage` | 90 | Share of the arena LP may fill; the rest is kept for checkpoints |
+| `memory_percentage` | 0 | Size the arena as this share (1–99) of the container's memory limit (cgroup v2 or v1) instead |
+| `lp_percentage` | 0 | With `memory_percentage`: the share of the container's limit up to which LP is admitted; with `checkpoint_reserve_percentage`, only until the size ratio is known |
+| `checkpoint_reserve_percentage` | 0 | With `memory_percentage`: set the LP limit from the span sizes. The band for checkpoints alone is this share of the container's limit × max(1, r) |
+| `size_window` | 30s | How long the span sizes are averaged over (1s–1h) |
+| `block_kib` | 4 | Allocation unit, 4–1024 KiB. A request wastes half a block on average |
+| `lp_limit_percentage` | 90 | Without `memory_percentage`: the share of the arena up to which LP is admitted |
 | `lp_refusal_code` | `resource_exhausted` | Or `unavailable` |
 | `mmap` | true | false allocates the arena as a Go slice (tests) |
 | `workers` | 10 | Concurrent sends or pipeline calls |
@@ -75,17 +81,16 @@ does not retry), checkpoints `Unavailable` (retried).
 | `forward.backoff_initial`, `forward.backoff_max` | 50ms, 1s | Pause after a failed send |
 | `metrics_interval` | 1s | Period of the metrics log line |
 
-Agent (forward mode), with the thresholds of a `memory_limiter` at 50 % soft and 70 % hard:
-LP is refused once the arena holds 50 % of the container's limit, and checkpoints once it
-holds 70 % and no LP is left to evict:
+### Agent (forward mode)
 
 ```yaml
 receivers:
   priorityarena:
-    memory_percentage: 70
-    lp_percentage: 50
+    memory_percentage: 70             # arena: 70 % of the container
+    lp_percentage: 50                 # LP limit until the span sizes are known
+    checkpoint_reserve_percentage: 10 # then: checkpoint band of 10 % x max(1, r)
     forward:
-      endpoint: otelgw:4317
+      endpoint: gateway:4317
 exporters:
   nop:
 service:
@@ -95,19 +100,21 @@ service:
       exporters: [nop]
 ```
 
-In a 256 MiB container that is a 179 MiB arena; set `GOMEMLIMIT` to what is left after it
-and room for the binary and stacks (about 64MiB). The receiver warns at start when
-`GOMEMLIMIT` is larger. Nothing else needs a threshold: admission is checked against exact
-free space before a request is copied, so the arena cannot overshoot, and evicting frees memory
-at once, with no GC involved. The memory outside the arena is mostly requests gRPC is reading;
-`grpc.max_concurrent_streams` and `grpc.max_recv_msg_size_mib` bound it.
+In a 256 MiB container that is a 179 MiB arena, which leaves 77 MiB for the rest of the process.
+Set `GOMEMLIMIT` below that (40 MiB works for a full contrib build); the receiver warns at start when
+`GOMEMLIMIT` would not fit beside the arena. Memory outside the arena is mostly
+requests gRPC is reading: `grpc.max_concurrent_streams` and `grpc.max_recv_msg_size_mib` bound it.
 
-Gateway (pipeline mode), with the exporter's queue off:
+### Gateway (pipeline mode)
 
 ```yaml
 receivers:
   priorityarena:
-    memory_mib: 1024
+    grpc:
+      max_recv_msg_size_mib: 64
+    memory_percentage: 70
+    lp_percentage: 50
+    checkpoint_reserve_percentage: 10
     workers: 4
     max_batch_spans: 20000
     linger: 1s
@@ -124,40 +131,51 @@ service:
 
 ## Metrics
 
-One log line, `priority_arena_metrics`, every `metrics_interval`. All counts are spans unless
-named requests.
+The collector's own metrics carry three gauges: `otelcol_priorityarena_blocks_used`,
+`otelcol_priorityarena_queued_spans` and `otelcol_priorityarena_lp_limit_blocks`. The usual receiver
+metrics (`otelcol_receiver_accepted_spans`, `otelcol_receiver_refused_spans`) count requests read.
+
+Every `metrics_interval` the receiver also logs one line, `priority_arena_metrics`. Counts are spans
+unless named otherwise.
 
 | Field | |
 |---|---|
-| `hp_admitted`, `lp_admitted` | Admitted |
+| `hp_admitted`, `lp_admitted`, `*_admitted_bytes`, `*_admitted_blocks` | Admitted, and the bytes and blocks they took |
 | `hp_refused`, `lp_refused` | Refused after reading |
 | `hp_refused_requests_predecode`, `lp_refused_requests_predecode` | Requests refused from their headers |
 | `hp_admitted_by_eviction`, `lp_evicted`, `lp_evicted_requests` | Checkpoints admitted by evicting LP, and the LP evicted |
 | `hp_sent`, `lp_sent`, `hp_failed`, `lp_failed` | Delivered, and dropped after a permanent error |
 | `hp_requeued`, `lp_requeued`, `sends`, `send_errors` | Retries |
 | `hp_queued_spans`, `lp_queued_spans`, `hp_queued_blocks`, `lp_queued_blocks` | Queued now |
-| `blocks_used`, `blocks_used_max`, `blocks_total`, `block_bytes` | Arena use |
-| `gc_cycles`, `gc_cpu_seconds`, `heap_live_bytes`, `heap_objects_bytes`, `heap_allocs_bytes_total` | Go runtime, from `runtime/metrics` |
+| `blocks_used`, `blocks_used_max`, `blocks_total`, `block_bytes`, `lp_used_blocks` | Arena use |
+| `lp_limit_blocks`, `size_ratio` | The LP limit in force, and the size ratio it was set from (NaN until known; absent for a fixed limit) |
+| `gc_cycles`, `gc_cpu_seconds`, `heap_live_bytes`, `heap_objects_bytes`, `heap_allocs_bytes_total` | Go runtime |
 
 ## Limitations
 
-* Requests must be priority-homogeneous, as the bridges SDK sends them. Without the header a
-  request counts as a checkpoint.
+* Requests must be priority-homogeneous. Without the header a request counts as a checkpoint.
 * Forward mode has no TLS, compression or authentication on the outgoing connection.
 * Spans refused before reading are counted as requests; their spans are unknown.
-* The wire scan checks structure, not span contents; pipeline mode drops requests pdata cannot
-  decode, one by one.
+* The wire scan checks structure, not span contents. Pipeline mode drops requests pdata cannot decode,
+  one by one.
+* The arena is off-heap on Linux only. Elsewhere it is an ordinary Go slice that counts towards
+  `GOMEMLIMIT`, and `memory_percentage` needs a Linux cgroup memory limit.
 
-## Tests and tools
+## Internal checks
 
-`go test ./priorityarenareceiver/` covers the arena accounting (including a randomized test
-that checks every block after each step), admission and eviction, the span scan against pdata
-(with a fuzz target, `FuzzCountSpans`), and forward-to-pipeline delivery and overload over real
-gRPC.
+The store's bookkeeping is the only record of which blocks hold which request. Accounting errors
+that input cannot cause (a block freed twice, a chain shorter than its count, more blocks returned by
+gRPC than lent) stop the process with `priorityarena: invariant broken: ...`, rather than send the
+wrong bytes or leak blocks. Requests and configuration values that do not fit are refused or
+rejected instead.
 
-`testbed/load` offers SDK-shaped load (requests of at most 512 spans every 100 ms per client,
-HP and LP separate and tagged) and reports acked, refused and dropped spans and latency per
-class. `testbed/sink` stands in for the gateway: it counts spans per class at a capacity that
-follows a schedule, pushing back by delaying responses, and refusing once its queue is full.
-`cmd/prioritycol` is a small collector with the components of both pipelines, for comparing
-them on identical binaries.
+## Tests
+
+`go test ./priorityarenareceiver/` covers the arena accounting (including a randomized test that
+checks every block after each step), admission and eviction, the adaptive LP limit, the internal
+checks, the span scan against pdata (with a fuzz target, `FuzzCountSpans`), and delivery and overload
+from a forwarding agent to a pipeline-mode gateway over real gRPC.
+
+`testbed/load` offers SDK-like load (requests of at most 512 spans every 100 ms per client, classes
+tagged), and `testbed/sink` stands in for the gateway at a capacity that follows a schedule.
+`testbed/ab/run_ab.py` runs one scenario against one collector configuration.
